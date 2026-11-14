@@ -1,0 +1,23 @@
+# сборка
+build/
+dist/
+Portable/
+*.spec.bak
+
+# бинарники, которые не хранятся в репозитории
+bin/*.exe
+bin/*.dll
+
+# кеш Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# рабочие файлы
+crash.log
+*_tmp_*
+*.mp4
+/test_faststart.mp4
+/tests_tmp_norm.wav
+/Projects/*

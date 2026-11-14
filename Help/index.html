@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Руководство пользователя — Тифлокомментатор видео с Google Gemini</title>
+    <style>
+        :root {
+            --bg-color: #0f1117;
+            --card-bg: #1a1d27;
+            --card-border: #2e3447;
+            --text-color: #e2e8f0;
+            --text-muted: #94a3b8;
+            --accent-primary: #38bdf8;
+            --accent-secondary: #818cf8;
+            --accent-success: #34d399;
+            --accent-warning: #fbbf24;
+            --accent-danger: #f87171;
+            --code-bg: #090d16;
+            --kbd-bg: #272f45;
+            --table-border: #334155;
+            --table-header-bg: #1e293b;
+            --table-alt-bg: #131722;
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.7;
+            margin: 0;
+            padding: 0;
+        }
+
+        header {
+            background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%);
+            border-bottom: 2px solid var(--accent-secondary);
+            padding: 40px 20px;
+            text-align: center;
+        }
+        header h1 { margin: 0 0 10px 0; font-size: 2.2rem; color: #ffffff; }
+        header p { margin: 0; font-size: 1.15rem; color: var(--accent-primary); }
+
+        .container { max-width: 1100px; margin: 0 auto; padding: 30px 20px 80px 20px; }
+
+        nav.toc {
+            background-color: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 24px 30px;
+            margin-bottom: 40px;
+        }
+        nav.toc h2 {
+            margin-top: 0;
+            font-size: 1.4rem;
+            color: var(--accent-primary);
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 10px;
+        }
+        nav.toc ol {
+            margin: 0;
+            padding-left: 24px;
+            columns: 2;
+            column-gap: 40px;
+        }
+        @media (max-width: 768px) { nav.toc ol { columns: 1; } }
+        nav.toc li { margin-bottom: 8px; }
+        nav.toc a { color: var(--text-color); text-decoration: none; }
+        nav.toc a:hover, nav.toc a:focus { color: var(--accent-primary); text-decoration: underline; }
+
+        section {
+            background-color: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 35px;
+        }
+        h2 {
+            color: var(--accent-primary);
+            font-size: 1.6rem;
+            margin-top: 0;
+            margin-bottom: 20px;
+            border-bottom: 2px solid var(--card-border);
+            padding-bottom: 8px;
+        }
+        h3 { color: #ffffff; font-size: 1.25rem; margin-top: 25px; margin-bottom: 12px; }
+        p, li { font-size: 1.05rem; color: var(--text-color); }
+        ul, ol { padding-left: 24px; }
+        li { margin-bottom: 8px; }
+        a { color: var(--accent-primary); text-decoration: underline; }
+        a:hover, a:focus { color: #7dd3fc; }
+
+        .alert {
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 20px 0;
+            border-left: 5px solid;
+            font-size: 1.05rem;
+        }
+        .alert-danger { background-color: rgba(239, 68, 68, 0.15); border-left-color: var(--accent-danger); color: #fca5a5; }
+        .alert-warning { background-color: rgba(245, 158, 11, 0.15); border-left-color: var(--accent-warning); color: #fde047; }
+        .alert-info { background-color: rgba(56, 189, 248, 0.12); border-left-color: var(--accent-primary); color: #bae6fd; }
+
+        kbd {
+            display: inline-block;
+            padding: 3px 7px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.9em;
+            color: #f8fafc;
+            background-color: var(--kbd-bg);
+            border: 1px solid #475569;
+            border-radius: 5px;
+            white-space: nowrap;
+        }
+
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 1rem; }
+        th, td { border: 1px solid var(--table-border); padding: 12px 16px; text-align: left; }
+        th { background-color: var(--table-header-bg); color: #ffffff; }
+        tr:nth-child(even) { background-color: var(--table-alt-bg); }
+
+        .analogy-card {
+            background: linear-gradient(135deg, rgba(30, 27, 75, 0.6) 0%, rgba(15, 23, 42, 0.6) 100%);
+            border: 1px solid var(--accent-secondary);
+            border-radius: 10px;
+            padding: 20px 24px;
+            margin: 20px 0;
+        }
+        .analogy-title { font-size: 1.2rem; font-weight: bold; color: #a5b4fc; margin-bottom: 10px; }
+
+        footer { text-align: center; color: var(--text-muted); font-size: 0.95rem; padding: 20px; }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Руководство пользователя программы «Тифлокомментатор»</h1>
+    <p>Автоматизированное и ручное создание тифлокомментариев к видео с помощью Google Gemini и синтезаторов речи</p>
+</header>
+
+<div class="container">
+    <nav class="toc" aria-label="Оглавление инструкции">
+        <h2>Содержание</h2>
+        <ol>
+            <li><a href="#section-requirements">1. Системные требования</a></li>
+            <li><a href="#section-security">2. Безопасность данных и конфиденциальность</a></li>
+            <li><a href="#section-setup">3. Подготовка: Smart DNS, настройка браузеров и API</a></li>
+            <li><a href="#section-settings">4. Подробный разбор настроек программы</a></li>
+            <li><a href="#section-project-start">5. Создание проекта и рабочее пространство</a></li>
+            <li><a href="#section-user-prompt">6. Пользовательские пожелания к стилю</a></li>
+            <li><a href="#section-characters">7. Карточки персонажей («Герои фильма»)</a></li>
+            <li><a href="#section-timeline">8. Работа с комментариями на таймлайне и в списке</a></li>
+            <li><a href="#section-fragment">9. Комментирование фрагмента видео</a></li>
+            <li><a href="#section-tts">10. Озвучивание комментариев (Gemini TTS и SAPI5)</a></li>
+            <li><a href="#section-dsp">11. Звукорежиссура, микширование и компрессор</a></li>
+            <li><a href="#section-export-import">12. Экспорт и импорт (MKV, Аудио, SRT)</a></li>
+            <li><a href="#section-shortcuts">13. Сводная таблица горячих клавиш</a></li>
+        </ol>
+    </nav>
+
+    <!-- 1. СИСТЕМНЫЕ ТРЕБОВАНИЯ -->
+    <section id="section-requirements">
+        <h2>1. Системные требования</h2>
+        <ul>
+            <li><strong>Операционная система:</strong> Microsoft Windows 10 x64 (64-разрядная) или Windows 11 x64 (минимальная поддерживаемая версия — Windows 10x64).</li>
+            <li><strong>Процессор:</strong> 64-битный двухъядерный процессор с тактовой частотой 2.0 ГГц или выше.</li>
+            <li><strong>Оперативная память (RAM):</strong> минимум 4 ГБ (рекомендуется 8 ГБ и более).</li>
+            <li><strong>Свободное место на диске:</strong> не менее 2 ГБ для временных файлов видеомонтажа и кэша аудио.</li>
+            <li><strong>Подключение к сети:</strong> широкополосный доступ в интернет для работы с Google Gemini API.</li>
+            <li><strong>Доступность:</strong> интерфейс программы полностью оптимизирован для незрячих пользователей и экранных дикторов NVDA и JAWS.</li>
+        </ul>
+    </section>
+
+    <!-- 2. БЕЗОПАСНОСТЬ ДАННЫХ -->
+    <section id="section-security">
+        <h2>2. Безопасность данных и конфиденциальность</h2>
+        <div class="alert alert-danger">
+            <strong>⚠️ ВАЖНОЕ ПРЕДУПРЕЖДЕНИЕ:</strong>
+            <p>1. Ваш персональный API-ключ Google AI Studio является строгим секретом и сохраняется в файле конфигурации <code>Settings.ini</code> в корневой папке программы.</p>
+            <p>2. Все созданные проекты, черновики тифлокомментариев, а также исходные видеоматериалы (включая личные и семейные видео) хранятся в каталоге <code>Projects/</code>.</p>
+            <p><strong>Программу с вашим файлом Settings.ini и каталогом Projects нельзя распространять и передавать третьим лицам!</strong> Это защитит ваши персональные видеозаписи от утечки, а ваш аккаунт Google API — от несанкционированного расхода квот и средств.</p>
+        </div>
+    </section>
+
+    <!-- 3. ПОДГОТОВКА К РАБОТЕ -->
+    <section id="section-setup">
+        <h2>3. Подготовка к работе: Smart DNS, настройка браузеров и Google AI Studio</h2>
+
+        <h3>3.1. Обход географических ограничений (Smart DNS)</h3>
+        <p>Для работы программы необходимо средство обхода региональных ограничений Google. Отличным и простым решением является сервис <strong>Smart DNS</strong>:</p>
+        <p>🔗 <a href="https://xbox-dns.ru/" target="_blank" rel="noopener noreferrer"><strong>https://xbox-dns.ru/</strong></a></p>
+        <p>Укажите предоставленные на сайте адреса DNS-серверов в свойствах вашего сетевого адаптера Windows (в свойствах протокола IPv4).</p>
+
+        <h3>3.2. Отключение собственного DNS в браузерах (DNS через HTTPS)</h3>
+        <div class="alert alert-warning">
+            <strong>Важная настройка браузера:</strong><br>
+            Помимо указания адресов DNS в сетевом подключении Windows, для успешного открытия портала <code>aistudio.google.com</code> <strong>необходимо отключить использование собственного встроенного DNS-сервера (DNS-over-HTTPS / DoH) в вашем браузере</strong>:
+        </div>
+
+        <h4>Инструкция для Google Chrome:</h4>
+        <ol>
+            <li>Откройте меню браузера (кнопка с тремя точками) и перейдите в <strong>«Настройки»</strong>.</li>
+            <li>Откройте раздел <strong>«Конфиденциальность и безопасность»</strong> → <strong>«Безопасность»</strong>.</li>
+            <li>Найдите параметр <strong>«Использовать безопасный DNS-сервер»</strong>.</li>
+            <li><strong>Выключите тумблер</strong> (переведите в неактивное состояние).</li>
+        </ol>
+
+        <h4>Инструкция для Mozilla Firefox:</h4>
+        <ol>
+            <li>Откройте меню браузера и зайдите в <strong>«Настройки»</strong>.</li>
+            <li>Перейдите во вкладку <strong>«Приватность и защита»</strong> и прокрутите страницу в самый низ до раздела <strong>«DNS через HTTPS»</strong> (либо откройте <em>«Основные» → «Параметры сети» → «Настроить...»</em>).</li>
+            <li>Выберите пункт <strong>«Отключено»</strong> (использовать системный распознаватель по умолчанию).</li>
+        </ol>
+
+        <h3>3.3. Получение API-ключа Google AI Studio</h3>
+        <ol>
+            <li>Перейдите по ссылке: 🔗 <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer"><strong>https://aistudio.google.com</strong></a></li>
+            <li>Войдите со своим Google-аккаунтом.</li>
+            <li>Нажмите <strong>«Get API key»</strong> и сгенерируйте новый секретный ключ.</li>
+            <li>Вставьте полученный ключ в программе в окне «Настройки» (<kbd>Ctrl</kbd> + <kbd>P</kbd>).</li>
+        </ol>
+
+        <h3>3.4. Оплата Google API с помощью зарубежных карт</h3>
+        <p>Для оплаты платных тарифов и повышенных квот Google API требуется банковская карта зарубежного банка. Оформить подходящую карту можно, например, на сервисе:</p>
+        <p>🔗 <a href="https://platipomiru.com/" target="_blank" rel="noopener noreferrer"><strong>https://platipomiru.com/</strong></a></p>
+    </section>
+
+    <!-- 4. ПОДРОБНЫЙ РАЗБОР НАСТРОЕК -->
+    <section id="section-settings">
+        <h2>4. Подробный разбор настроек программы (<kbd>Ctrl</kbd> + <kbd>P</kbd>)</h2>
+        <p>Окно настроек вызывается через меню <em>Настройки</em> или горячей клавишей <kbd>Ctrl</kbd> + <kbd>P</kbd>.</p>
+
+        <h3>Вкладка «Gemini API и модели»:</h3>
+        <ul>
+            <li><strong>API-ключ Gemini:</strong> Поле для ввода вашего персонального ключа Google AI Studio.</li>
+            <li><strong>Кнопка «Загрузить список моделей»:</strong> Запрашивает с серверов Google список актуальных моделей.</li>
+            <li><strong>Модель для комментирования:</strong> Языковая мультимодальная модель, создающая текст тифлокомментариев (например, <code>gemini-2.5-flash</code>).</li>
+            <li><strong>Модель для Gemini TTS (озвучивание):</strong> Выбор модели синтеза речи. <em>Важно: для озвучки тифлокомментариев необходимо выбирать модели, у которых в названии есть пометка <strong>"TTS"</strong></em> (например, <code>gemini-3.1-flash-tts-preview</code>). Обычные текстовые модели звук не синтезируют.</li>
+            <li><strong>Голос Gemini TTS:</strong> Выбор тембра диктора (Puck, Charon, Kore, Fenrir, Aoede и др.) с кнопкой тестового воспроизведения образца.</li>
+            <li>
+                <strong>Продолжительность одной части, передаваемой модели:</strong>
+                <div class="alert alert-info">
+                    <strong>Рекомендованная продолжительность одной части — 10 минут.</strong>
+                    <p><strong>Подробное объяснение:</strong></p>
+                    <ul>
+                        <li><strong>Если установить слишком маленькое значение (1–3 мин):</strong> Модель не видит достаточно полной картины сюжета, не успевает понять динамику сцены, взаимоотношения персонажей и контекст происходящего, что ухудшает точность и выразительность описания.</li>
+                        <li><strong>Если установить слишком большое значение (20–40 мин и более):</strong> Размер текста, выдаваемого моделью за один запрос, строго ограничен лимитом токенов ответа нейросети. Из-за этого лимита модель не может сделать достаточное количество комментариев и пропускает множество свободных пауз в фильме.</li>
+                        <li><strong>Значение 10 минут</strong> — идеальный баланс: модель успевает глубоко оценить происходящее в сцене и создает максимальное количество подробных комментариев для каждой паузы в речи героев.</li>
+                    </ul>
+                </div>
+            </li>
+            <li><strong>Пауза между запросами к API (сек):</strong> Время ожидания между отправкой частей видео (по умолчанию 20 секунд) для соблюдения лимитов запросов в минуту (RPM).</li>
+        </ul>
+
+        <h3>Вкладка «Синтез SAPI5»:</h3>
+        <ul>
+            <li><strong>Голос SAPI5:</strong> Выбор системного голоса Windows.</li>
+            <li><strong>Скорость речи:</strong> Настройка темпа чтения (от -10 до +10 с шагом 0.1).</li>
+            <li><strong>Громкость SAPI5:</strong> Уровень громкости синтезатора (0–100%).</li>
+            <li><strong>Макс. разгон речи (лимит):</strong> Ограничение автоматического ускорения реплики (по умолчанию 3.0x), гарантирующее разборчивость при вписывании комментария в короткую паузу.</li>
+        </ul>
+    </section>
+
+    <!-- 5. СОЗДАНИЕ ПРОЕКТА -->
+    <section id="section-project-start">
+        <h2>5. Создание проекта и организация рабочего пространства</h2>
+
+        <h3>Как открыть видео и создать проект</h3>
+        <ol>
+            <li>Нажмите <kbd>Ctrl</kbd> + <kbd>N</kbd> (или меню <em>Проект → Создать проект из видео...</em>).</li>
+            <li>Выберите исходный видеофайл любого популярного формата (MP4, MKV, AVI, MOV, TS).</li>
+            <li>Программа откроет окно подготовки: нормализует контейнер и извлечет звук фильма для мгновенного перемещения по таймлайну.</li>
+            <li>Проект сохранится в каталоге <code>Projects/</code>.</li>
+        </ol>
+
+        <h3>Оптимизация рабочего пространства</h3>
+        <p>Когда боковые панели не требуются для работы, их можно закрыть, тем самым значительно увеличив рабочее пространство таймлайна и плеера:</p>
+        <ul>
+            <li><strong>Закрыть / открыть панель списка комментариев:</strong> нажмите <kbd>Ctrl</kbd> + <kbd>L</kbd> или кнопку на верхней панели.</li>
+            <li><strong>Закрыть / открыть панель микшера и компрессора:</strong> нажмите <kbd>Ctrl</kbd> + <kbd>M</kbd> или кнопку на верхней панели.</li>
+            <li><strong>Быстрое переключение пропорций окна видео:</strong>
+                <ul>
+                    <li><kbd>Ctrl</kbd> + <kbd>1</kbd> — Компактный размер окна видео (50% ширины);</li>
+                    <li><kbd>Ctrl</kbd> + <kbd>2</kbd> — Стандартный размер окна видео (65% ширины);</li>
+                    <li><kbd>Ctrl</kbd> + <kbd>3</kbd> — Крупный размер окна видео (80% ширины).</li>
+                </ul>
+            </li>
+            <li><strong>Полноэкранный режим видео:</strong> клавиша <kbd>F11</kbd> (возврат по <kbd>Esc</kbd> или <kbd>F11</kbd>).</li>
+        </ul>
+    </section>
+
+    <!-- 6. ПОЛЬЗОВАТЕЛЬСКИЕ ПОЖЕЛАНИЯ -->
+    <section id="section-user-prompt">
+        <h2>6. Пользовательские пожелания по тифлокомментированию (<kbd>Ctrl</kbd> + <kbd>U</kbd>)</h2>
+        <p>В диалоге <em>«Пожелания к тифлокомментированию»</em> (<kbd>Ctrl</kbd> + <kbd>U</kbd>) можно задать персональные творческие инструкции для модели Google Gemini:</p>
+        <ul>
+            <li>Указать стилистику (например, динамичный стиль для экшена, мягкий тон для сказки, строгость для документалистики).</li>
+            <li>Сделать акцент на мимике, жестах персонажей или обстановке.</li>
+            <li>Запретить или потребовать использование специфических терминов.</li>
+        </ul>
+        <p>Инструкции сохраняются внутри проекта и автоматически учитываются при генерации комментариев.</p>
+    </section>
+
+    <!-- 7. КАРТОЧКИ ПЕРСОНАЖЕЙ -->
+    <section id="section-characters">
+        <h2>7. Карточки персонажей («Герои фильма», <kbd>Ctrl</kbd> + <kbd>K</kbd>)</h2>
+        <p>Благодаря карточкам персонажей модель Gemini точно распознает героев в кадре и называет их по именам, вместо обезличенных описаний «высокий мужчина» или «женщина в очках».</p>
+
+        <h3>Возможности и функции базы персонажей:</h3>
+        <ul>
+            <li><strong>Создание персонажа:</strong> нажмите «Добавить персонажа» (<kbd>Alt</kbd> + <kbd>A</kbd> или <kbd>Ctrl</kbd> + <kbd>N</kbd>).</li>
+            <li><strong>Захват кадра из видео:</strong> встроенный в карточки плеер позволяет легко найти кадр с героем и нажать кнопку <em>«Захватить текущий кадр»</em> (<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> или <kbd>F8</kbd>). К одной карточке можно прикрепить несколько скриншотов в разной одежде и ракурсах.</li>
+            <li><strong>Экспорт и импорт наборов карточек (<kbd>Alt</kbd> + <kbd>E</kbd> / <kbd>Alt</kbd> + <kbd>I</kbd>):</strong> базу созданных героев можно экспортировать в пакетный файл (ZIP/JSON) и мгновенно импортировать в другие проекты. Это чрезвычайно удобно при работе над <strong>сериалами, многосерийными фильмами или циклами передач</strong> с одними и теми же актерами.</li>
+            <li><strong>Совет тифлокомментатору:</strong> Обязательно помогайте модели и создавайте карточки главных героев самостоятельно перед запуском автоматического тифлокомментирования. Это существенно повышает точность сценария.</li>
+        </ul>
+    </section>
+
+    <!-- 8. РАБОТА С ТАЙМЛАЙНОМ -->
+    <section id="section-timeline">
+        <h2>8. Работа с комментариями на таймлайне и в списке</h2>
+
+        <h3>Создание, редактирование и перемещение</h3>
+        <ul>
+            <li><strong>Создание комментария:</strong> нажмите клавишу <kbd>Insert</kbd> в позиции курсора воспроизведения.</li>
+            <li><strong>Редактирование текста:</strong> выделите комментарий и нажмите <kbd>F2</kbd> (или дважды щелкните по строке в таблице).</li>
+            <li><strong>Перемещение по порядку:</strong> клавиши <kbd>Ctrl</kbd> + <kbd>Стрелка вверх</kbd> / <kbd>Ctrl</kbd> + <kbd>Стрелка вниз</kbd> в списке комментариев.</li>
+        </ul>
+
+        <div class="alert alert-warning">
+            <strong>⚠️ Удаление комментариев и звука на таймлайне:</strong>
+            <p>Обратите внимание: удаление тифлокомментариев и их озвучки непосредственно на таймлайне <strong>не работает по горячим клавишам</strong>, чтобы исключить случайное удаление при навигации и перемотке фильма.</p>
+            <p>Для удаления комментария или сброса звука прямо на таймлайне предусмотрено <strong>контекстное меню по правому клику мыши</strong>:</p>
+            <ul>
+                <li><strong>Щелкните правой кнопкой мыши</strong> на блоке нужного комментария на таймлайне.</li>
+                <li>В открывшемся меню доступны действия:
+                    <ul>
+                        <li><strong>«🗑️ Удалить комментарий»</strong> — полное удаление тифлокомментария из проекта;</li>
+                        <li><strong>«🔇 Удалить озвучку (сделать не озвученным)»</strong> — удаление сгенерированного аудиофайла (текст комментария сохраняется);</li>
+                        <li><strong>«✏️ Редактировать текст...»</strong> — изменение текста тифлокомментария;</li>
+                        <li><strong>«🔊 Озвучить Gemini TTS»</strong> / <strong>«🗣️ Озвучить SAPI5»</strong> — точечная переозвучка выбранной фразы.</li>
+                    </ul>
+                </li>
+            </ul>
+            <p><em>Примечание:</em> В боковой панели списка комментариев удаление также доступно по клавише <kbd>Delete</kbd>.</p>
+        </div>
+    </section>
+
+    <!-- 9. КОММЕНТИРОВАНИЕ ФРАГМЕНТА -->
+    <section id="section-fragment">
+        <h2>9. Комментирование фрагмента видео (<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>G</kbd>)</h2>
+        <p>Если вам нужно прокомментировать или повторно проанализировать конкретный отрезок фильма:</p>
+        <ol>
+            <li>Поставьте метку начала фрагмента клавишей <kbd>[</kbd> или <kbd>I</kbd> (In-point).</li>
+            <li>Поставьте метку конца фрагмента клавишей <kbd>]</kbd> или <kbd>O</kbd> (Out-point).</li>
+            <li>Нажмите <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>G</kbd> (или меню <em>Генерация → Прокомментировать фрагмент...</em>).</li>
+            <li>Модель обработает только выделенный интервал времени и добавит созданные комментарии в проект.</li>
+            <li>Чтобы снять выделение диапазона на таймлайне, нажмите <kbd>Escape</kbd>.</li>
+        </ol>
+    </section>
+
+    <!-- 10. ОЗВУЧИВАНИЕ -->
+    <section id="section-tts">
+        <h2>10. Озвучивание комментариев (Gemini TTS и SAPI5)</h2>
+        <p>В программе реализовано два движка синтеза речи:</p>
+        <ul>
+            <li><strong>Google Gemini TTS (<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd>):</strong> синтезирует выразительную человечную дикторскую речь. <em>Напоминаем: в Настройках обязательно должна быть выбрана модель с пометкой <strong>"TTS"</strong>.</em></li>
+            <li><strong>Windows SAPI5 (<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd>):</strong> локальный системный синтез без интернета.</li>
+        </ul>
+        <p>Движок автоматически замеряет длительность свободной паузы между диалогами фильма и, при необходимости, ускоряет речь (без изменения тона и питча), гарантируя попадание комментария в паузу.</p>
+    </section>
+
+    <!-- 11. ЗВУКОРЕЖИССУРА И КОМПРЕССОР -->
+    <section id="section-dsp">
+        <h2>11. Звукорежиссура, микширование и компрессор</h2>
+
+        <div class="alert alert-warning">
+            <strong>⚠️ ВАЖНО: Режим итогового звука</strong><br>
+            Переключатель <strong>«Итоговый звук (Мастер-аудио)»</strong> в панели микшера необходимо включать <strong>только перед итоговым выводом в файл</strong> для контрольного прослушивания. В процессе монтажа и навигации держите включенным режим «Обычный звук».
+        </div>
+
+        <h3>Шкала децибел (dB):</h3>
+        <ul>
+            <li><strong>0 dB (ноль децибел):</strong> Нормальная громкость исходных дорожек.</li>
+            <li><strong>Отрицательные значения (-3 dB, -6 dB, -12 dB):</strong> Пониженная громкость.</li>
+            <li><strong>Положительные значения (+3 dB, +6 dB, +12 dB):</strong> Повышенная громкость (действует при прослушивании итогового аудио и при экспорте).</li>
+        </ul>
+
+        <div class="analogy-card">
+            <div class="analogy-title">🎧 Аналогия работы компрессора: Человек с ручкой громкости</div>
+            <p>Представьте внимательного человека-звукорежиссера, который непрерывно слушает фильм и держит руку на ручке регулировки громкости:</p>
+            <ul>
+                <li>Он заранее «заглядывает вперед» по таймлайну (параметр <strong>Lookahead / Упреждение</strong>) и видит, что через мгновение начнется тифлокомментарий.</li>
+                <li>Как только комментарий начинает звучать, человек <strong>быстро и плавно убавляет громкость фильма</strong> (срабатывание компрессора и авто-дакинг), чтобы голос диктора звучал кристально четко и разборчиво.</li>
+                <li>Когда тифлокомментарий прозвучал, звукорежиссер <strong>плавно возвращает ручку громкости фильма обратно</strong> (параметр <strong>Release / Восстановление</strong>). Реплики персонажей фильма тут же звучат в полную силу, на той же комфортной громкости, создавая ощущение абсолютно ровного баланса.</li>
+            </ul>
+        </div>
+
+        <h3>Секрет идеального баланса:</h3>
+        <p>Нужно подобрать громкость комментариев и звука фильма таким образом, чтобы комментарии звучали немного громче фильма. Тогда, при звучании тифлокомментария компрессор убавит громкость фильма, а когда комментарий прозвучит — вернет громкость, и зритель услышит диалоги персонажей на той же громкости (общая громкость будет казаться одинаковой). Подняв уровень громкости до положительных значений, можно выровнять по громкости и сам фильм, и тифлокомментарии.</p>
+    </section>
+
+    <!-- 12. ВСЕ ВИДЫ ЭКСПОРТА И ИМПОРТА -->
+    <section id="section-export-import">
+        <h2>12. Все виды экспорта и импорта</h2>
+
+        <h3>12.1. Экспорт полного видео в MKV (<kbd>Ctrl</kbd> + <kbd>E</kbd>)</h3>
+        <p>Создает итоговый видеофайл Matroska (.mkv) с оригинальным видеорядом, звуком фильма и встроенной сведенной аудиодорожкой тифлокомментариев.</p>
+
+        <h3>12.2. Экспорт только аудио (<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>A</kbd>)</h3>
+        <p>Экспортирует сведенную мастер-аудиодорожку в формате <strong>MP3</strong> или <strong>WAV</strong>.</p>
+
+        <div class="alert alert-info">
+            <strong>🎭 Экспорт только аудио тифлокомментариев для открытых показов:</strong>
+            <p>Для открытых показов в кинотеатрах и залах (где звук фильма воспроизводится через динамики зала, а тифлокомментарии подаются незрячим зрителям в наушники через радиоприемники) требуется дорожка <strong>только с тифлокомментариями без звука фильма</strong>.</p>
+            <p><strong>Как это сделать:</strong> Перед экспортом аудио в правой панели микшера включите флажок <strong>«Mute» (Выключить звук видео)</strong> на регуляторе фильма, а затем нажмите <em>«Экспорт аудио»</em> (<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>A</kbd>).</p>
+        </div>
+
+        <h3>12.3. Импорт и экспорт субтитров SRT (<kbd>Ctrl</kbd> + <kbd>I</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd>)</h3>
+        <p>Так уж повелось, что многие тифлокомментаторы пишут комментарии в редакторах субтитров. Программа полностью поддерживает этот процесс:</p>
+        <ul>
+            <li><strong>Импорт из SRT (<kbd>Ctrl</kbd> + <kbd>I</kbd>):</strong> мгновенно загружает готовые тексты и тайминги субтитров в проект для последующего озвучивания.</li>
+            <li><strong>Экспорт в SRT (<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd>):</strong> сохраняет комментарии в стандартный файл субтитров SRT (UTF-8).</li>
+        </ul>
+
+        <h3>12.4. Экспорт и импорт карточек персонажей (<kbd>Alt</kbd> + <kbd>E</kbd> / <kbd>Alt</kbd> + <kbd>I</kbd>)</h3>
+        <p>Позволяет переносить базу героев со скриншотами между сериями и проектами.</p>
+    </section>
+
+    <!-- 13. СВОДНАЯ ТАБЛИЦА ГОРЯЧИХ КЛАВИШ -->
+    <section id="section-shortcuts">
+        <h2>13. Сводная таблица горячих клавиш</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 28%;">Комбинация клавиш</th>
+                    <th style="width: 36%;">Действие</th>
+                    <th style="width: 36%;">Область действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>N</kbd></td>
+                    <td>Создать новый проект из видео</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>O</kbd></td>
+                    <td>Открыть существующий проект</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>S</kbd></td>
+                    <td>Сохранить текущий проект</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>Q</kbd></td>
+                    <td>Выход из программы</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>P</kbd></td>
+                    <td>Открыть «Настройки программы»</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>U</kbd></td>
+                    <td>Пожелания к тифлокомментированию</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>K</kbd></td>
+                    <td>Открыть «Герои фильма» (карточки персонажей)</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>U</kbd></td>
+                    <td>Статистика расхода токенов и стоимости</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>G</kbd></td>
+                    <td>Создать тифлокомментарии для фильма (Gemini)</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>G</kbd></td>
+                    <td>Прокомментировать выделенный фрагмент</td>
+                    <td>Главное окно / Таймлайн</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd></td>
+                    <td>Озвучить оставшиеся комментарии (Gemini TTS)</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd></td>
+                    <td>Озвучить оставшиеся комментарии (SAPI5)</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>E</kbd></td>
+                    <td>Экспортировать готовый фильм в MKV</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>A</kbd></td>
+                    <td>Экспортировать аудио (MP3 / WAV)</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>I</kbd></td>
+                    <td>Импортировать комментарии из файла SRT</td>
+                    <td>Главное окно / Таблица</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd></td>
+                    <td>Экспортировать комментарии в файл SRT</td>
+                    <td>Главное окно / Таблица</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>L</kbd></td>
+                    <td>Скрыть / показать список комментариев</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>M</kbd></td>
+                    <td>Скрыть / показать панель микшера и компрессора</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></td>
+                    <td>Размер окна видео: Компактный (50%) / Стандартный (65%) / Крупный (80%)</td>
+                    <td>Главное окно</td>
+                </tr>
+                <tr>
+                    <td><kbd>F11</kbd></td>
+                    <td>Полноэкранный режим видео (выход по Esc / F11)</td>
+                    <td>Главное окно / Плеер</td>
+                </tr>
+                <tr>
+                    <td><kbd>Insert</kbd></td>
+                    <td>Создать комментарий в текущей позиции</td>
+                    <td>Главное окно / Таймлайн / Таблица</td>
+                </tr>
+                <tr>
+                    <td><kbd>Пробел</kbd></td>
+                    <td>Воспроизведение / Пауза</td>
+                    <td>Таймлайн / Плеер / Карточки</td>
+                </tr>
+                <tr>
+                    <td><kbd>Стрелка влево</kbd> / <kbd>вправо</kbd></td>
+                    <td>Перемотка на 5 сек назад / вперед (с Shift — на 1 сек)</td>
+                    <td>Таймлайн / Плеер</td>
+                </tr>
+                <tr>
+                    <td><kbd>Home</kbd> / <kbd>End</kbd></td>
+                    <td>Перейти в начало / конец фильма</td>
+                    <td>Таймлайн</td>
+                </tr>
+                <tr>
+                    <td><kbd>[</kbd> или <kbd>I</kbd></td>
+                    <td>Установить начало фрагмента (In-point)</td>
+                    <td>Таймлайн</td>
+                </tr>
+                <tr>
+                    <td><kbd>]</kbd> или <kbd>O</kbd></td>
+                    <td>Установить конец фрагмента (Out-point)</td>
+                    <td>Таймлайн</td>
+                </tr>
+                <tr>
+                    <td><kbd>Escape</kbd></td>
+                    <td>Сбросить выделение фрагмента / Закрыть диалог</td>
+                    <td>Таймлайн / Диалоги</td>
+                </tr>
+                <tr>
+                    <td><kbd>F2</kbd> или <kbd>Enter</kbd></td>
+                    <td>Редактировать текст комментария</td>
+                    <td>Список комментариев</td>
+                </tr>
+                <tr>
+                    <td><kbd>Delete</kbd></td>
+                    <td>Удалить комментарий</td>
+                    <td>Список комментариев</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>Стрелка вверх</kbd> / <kbd>вниз</kbd></td>
+                    <td>Переместить комментарий выше / ниже</td>
+                    <td>Список комментариев</td>
+                </tr>
+                <tr>
+                    <td><kbd>G</kbd> / <kbd>S</kbd></td>
+                    <td>Озвучить комментарий через Gemini TTS / SAPI5</td>
+                    <td>Список комментариев</td>
+                </tr>
+                <tr>
+                    <td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> / <kbd>F8</kbd></td>
+                    <td>Захватить текущий кадр фильма для карточки персонажа</td>
+                    <td>Окно «Герои фильма»</td>
+                </tr>
+                <tr>
+                    <td><kbd>Alt</kbd> + <kbd>A</kbd> / <kbd>Alt</kbd> + <kbd>D</kbd></td>
+                    <td>Добавить персонажа / Удалить персонажа</td>
+                    <td>Окно «Герои фильма»</td>
+                </tr>
+                <tr>
+                    <td><kbd>Alt</kbd> + <kbd>E</kbd> / <kbd>Alt</kbd> + <kbd>I</kbd></td>
+                    <td>Экспорт / Импорт базы персонажей</td>
+                    <td>Окно «Герои фильма»</td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+</div>
+
+<footer>
+    <p>Тифлокомментатор видео с Google Gemini &copy; 2026. Программа оптимизирована для экранных дикторов NVDA и JAWS.</p>
+</footer>
+
+</body>
+</html>
