@@ -1,0 +1,74 @@
+# Сборка портативного Tiflocommentator.exe на Windows-раннере GitHub.
+# Запуск вручную (Actions -> Сборка exe -> Run workflow) или по тегу v*, тогда
+# готовый exe дополнительно попадает в Releases.
+
+name: Сборка exe
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@v4
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Скачать ffmpeg и ffprobe
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_pkg
+          $ffmpeg = Get-ChildItem ffmpeg_pkg -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force bin | Out-Null
+          Copy-Item $ffmpeg.FullName "bin\ffmpeg.exe" -Force
+          Copy-Item (Join-Path $ffmpeg.DirectoryName "ffprobe.exe") "bin\ffprobe.exe" -Force
+          Remove-Item ffmpeg.zip, ffmpeg_pkg -Recurse -Force
+          .\bin\ffmpeg.exe -version | Select-Object -First 1
+
+      - name: Зависимости
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller pillow
+
+      - name: Сборка
+        run: python build_portable.py
+
+      - name: Проверка результата
+        shell: pwsh
+        run: |
+          $exe = "Portable\Tiflocommentator.exe"
+          if (!(Test-Path $exe)) { throw "exe не собран: $exe отсутствует" }
+          $mb = (Get-Item $exe).Length / 1MB
+          "Размер сборки: {0:N1} МБ" -f $mb
+
+      - name: Артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tiflocommentator-exe
+          path: Portable/Tiflocommentator.exe
+          retention-days: 3
+
+      - name: Релиз по тегу
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Portable/Tiflocommentator.exe
+          name: Тифлокомментатор ${{ github.ref_name }}
+          body: |
+            Портативная сборка для Windows 10/11, 64 бита.
+            Распаковать exe в отдельную папку и запустить — установка не нужна.
+            Рядом с exe создаётся Settings.ini, ключ Gemini вводится в настройках.
