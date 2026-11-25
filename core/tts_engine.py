@@ -150,6 +150,7 @@ class TTSService:
     def __init__(self, config_manager, gemini_client=None):
         self.config = config_manager
         self.gemini_client = gemini_client
+        self.last_error = ''
 
     def adjust_audio_for_duration(
         self,
@@ -266,6 +267,9 @@ class TTSService:
                 voice_name=self.config.gemini_tts_voice,
                 model_name=self.config.gemini_tts_model
             )
+            if not success:
+                self.last_error = (getattr(self.gemini_client, 'last_error', '')
+                                   or 'Google Gemini не вернул аудиоданные (подробности в журнале).')
 
         if not success or not os.path.isfile(raw_wav_path):
             return False

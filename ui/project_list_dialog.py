@@ -33,6 +33,7 @@ class ProjectListDialog(QDialog):
         self.config = config_manager
         self.selected_project: Optional[Project] = None
         self.resume_requested = False
+        self.start_generation_requested = False
 
         self.setWindowTitle("Менеджер проектов тифлокомментирования")
         self.resize(800, 450)
@@ -153,7 +154,7 @@ class ProjectListDialog(QDialog):
         )
         if prep_dlg.exec() and prep_dlg.result_project:
             self.selected_project = prep_dlg.result_project
-            self.resume_requested = True
+            self.start_generation_requested = True
             self.config.last_project = self.selected_project.folder_path
             self.config.save()
             self.accept()

@@ -10,6 +10,7 @@
 
 import os
 import math
+import time
 import wave
 import struct
 from typing import List, Dict, Any, Optional
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider,
     QStyle, QSizePolicy
 )
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QAudioBufferOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtCore import Qt, QUrl, Signal, Slot, QPoint, QEvent, QTimer
 from ui.accessible_slider import AccessibleSmoothSlider
@@ -79,7 +80,7 @@ class FullscreenPlayerWindow(QWidget):
         self.slider_pos = AccessibleSmoothSlider(Qt.Horizontal, self)
         self.slider_pos.setRange(0, 1000)
         self.slider_pos.setAccessibleName("Позиция воспроизведения видео в полноэкранном режиме")
-        self.slider_pos.sliderMoved.connect(self.parent_player.set_position)
+        self.slider_pos.sliderMoved.connect(lambda ms: self.parent_player.set_position(ms, deferred=True))
         row_slider.addWidget(self.slider_pos, 1)
 
         self.lbl_time = QLabel("00:00:00 / 00:00:00", self)
@@ -125,6 +126,14 @@ class FullscreenPlayerWindow(QWidget):
         ctrl_layout.addLayout(row_btns)
         self.main_layout.addWidget(self.ctrl_panel, 0)
 
+    def _flush_slider_update(self):
+        self._slider_update_scheduled = False
+        ms = getattr(self, '_pending_slider_ms', None)
+        self._pending_slider_ms = None
+        if ms is None or self.slider_pos.isSliderDown():
+            return
+        self.slider_pos.setValue(ms)
+
     def set_subtitle_text(self, text: str):
         if text.strip():
             self.lbl_subtitle.setText(text)
@@ -136,7 +145,10 @@ class FullscreenPlayerWindow(QWidget):
     def sync_state(self, pos_ms: int, dur_ms: int, is_playing: bool):
         if not self.slider_pos.isSliderDown():
             self.slider_pos.setRange(0, dur_ms)
-            self.slider_pos.setValue(pos_ms)
+            self._pending_slider_ms = int(pos_ms)
+            if not getattr(self, '_slider_update_scheduled', False):
+                self._slider_update_scheduled = True
+                QTimer.singleShot(0, self._flush_slider_update)
         pos_s = pos_ms // 1000
         dur_s = dur_ms // 1000
         pos_str = f"{pos_s//3600:02d}:{(pos_s%3600)//60:02d}:{pos_s%60:02d}"
@@ -190,6 +202,13 @@ class VideoPlayerWidget(QWidget):
         self.current_comm_audio_file = ""
         self.pending_comm_offset_ms = 0
         self.fs_window: Optional[FullscreenPlayerWindow] = None
+
+        # Отложенное обновление слайдера и перемотки — вне обработчиков ввода
+        self._pending_slider_ms = None
+        self._slider_update_scheduled = False
+        self._pending_seek_ms = None
+        self._seek_scheduled = False
+        self._in_position_update = False
 
         # DSP параметры звука (автодакинг, громкости, компрессор/лимитер)
         self.movie_vol_db: float = 0.0
@@ -264,7 +283,7 @@ class VideoPlayerWidget(QWidget):
         self.slider_pos = AccessibleSmoothSlider(Qt.Horizontal, self)
         self.slider_pos.setRange(0, 1000)
         self.slider_pos.setAccessibleName("Позиция воспроизведения фильма")
-        self.slider_pos.sliderMoved.connect(self.set_position)
+        self.slider_pos.sliderMoved.connect(lambda ms: self.set_position(ms, deferred=True))
         row_slider.addWidget(self.slider_pos, 1)
 
         self.lbl_time = QLabel("00:00:00 / 00:00:00", self)
@@ -332,10 +351,88 @@ class VideoPlayerWidget(QWidget):
         self.comm_player.setAudioOutput(self.comm_audio_out)
         self.comm_player.mediaStatusChanged.connect(self._on_comm_media_status_changed)
 
+        # Удерживаемые пики реального уровня звука (индикатор в реальном времени)
+        self._rt_movie_peak_db = -60.0
+        self._rt_movie_peak_ts = time.monotonic()
+        self._rt_comm_peak_db = -60.0
+        self._rt_comm_peak_ts = time.monotonic()
+
+        self._buf_out_movie = QAudioBufferOutput(self)
+        self._buf_out_movie.audioBufferReceived.connect(self._on_movie_audio_buffer)
+        self.player.setAudioBufferOutput(self._buf_out_movie)
+
+        self._buf_out_comm = QAudioBufferOutput(self)
+        self._buf_out_comm.audioBufferReceived.connect(self._on_comm_audio_buffer)
+        self.comm_player.setAudioBufferOutput(self._buf_out_comm)
+
         # Высокоточный таймер для гладкого управления DSP огибающей дакинга (50 Гц)
         self.dsp_timer = QTimer(self)
         self.dsp_timer.setInterval(20)
         self.dsp_timer.timeout.connect(self._on_dsp_timer_tick)
+
+    @staticmethod
+    def _buffer_peak_linear(buffer) -> float:
+        """Пиковый уровень аудиобуфера в линейной шкале (0.0 ... 1.0)."""
+        try:
+            fmt = buffer.format()
+            name = str(fmt.sampleFormat()).split('.')[-1]
+            data = buffer.data()
+            if data is None:
+                return 0.0
+            mv = memoryview(data)
+            if mv.nbytes == 0:
+                return 0.0
+            if name == 'Int16':
+                arr = np.frombuffer(mv, dtype=np.int16)
+                return float(np.max(np.abs(arr.astype(np.int32)))) / 32768.0
+            if name == 'Int32':
+                arr = np.frombuffer(mv, dtype=np.int32)
+                return float(np.max(np.abs(arr.astype(np.float64)))) / 2147483648.0
+            if name == 'Float':
+                arr = np.frombuffer(mv, dtype=np.float32)
+                return min(1.0, float(np.max(np.abs(arr))))
+            if name == 'UInt8':
+                arr = np.frombuffer(mv, dtype=np.uint8).astype(np.int16) - 128
+                return float(np.max(np.abs(arr))) / 128.0
+        except Exception:
+            return 0.0
+        return 0.0
+
+    RT_PEAK_DECAY_DB_PER_SEC = 30.0
+
+    def _reset_rt_peaks(self):
+        """Сбрасывает удерживаемые пики индикатора в тишину."""
+        now = time.monotonic()
+        self._rt_movie_peak_db = -60.0
+        self._rt_movie_peak_ts = now
+        self._rt_comm_peak_db = -60.0
+        self._rt_comm_peak_ts = now
+
+    def _rt_level_at(self, peak_db: float, ts: float, now: float) -> float:
+        """Удерживаемый пик с плавным спадом на момент времени now."""
+        return max(-60.0, peak_db - self.RT_PEAK_DECAY_DB_PER_SEC * max(0.0, now - ts))
+
+    def _on_movie_audio_buffer(self, buffer):
+        """Обновляет удерживаемый пик звука фильма по декодированному буферу."""
+        if self.is_using_master_audio:
+            return
+        now = time.monotonic()
+        peak = self._buffer_peak_linear(buffer)
+        inst_db = 20.0 * math.log10(peak) if peak > 0.0 else -60.0
+        held = self._rt_level_at(self._rt_movie_peak_db, self._rt_movie_peak_ts, now)
+        self._rt_movie_peak_db = max(-60.0, held, inst_db)
+        self._rt_movie_peak_ts = now
+
+    def _on_comm_audio_buffer(self, buffer):
+        """Обновляет удерживаемый пик звука комментариев по декодированному буферу."""
+        if self.is_using_master_audio:
+            return
+        now = time.monotonic()
+        peak = self._buffer_peak_linear(buffer)
+        inst_db = 20.0 * math.log10(peak) if peak > 0.0 else -60.0
+        held = self._rt_level_at(self._rt_comm_peak_db, self._rt_comm_peak_ts, now)
+        self._rt_comm_peak_db = max(-60.0, held, inst_db)
+        self._rt_comm_peak_ts = now
 
     def calculate_dsp_levels(self):
         """
@@ -525,13 +622,26 @@ class VideoPlayerWidget(QWidget):
                 if 0 <= env_idx < len(self._master_peak_envelope):
                     level_db = float(self._master_peak_envelope[env_idx])
             elif not self.is_using_master_audio:
-                # В режиме быстрого редактирования
-                pos_sec = pos_ms / 1000.0
-                comm_act = self.compute_commentary_activity(pos_sec)
-                if comm_act > 0 and not self.comm_muted:
-                    level_db = max(-30.0, min(0.0, -3.0 + self.comm_vol_db))
-                elif not self.movie_muted:
-                    level_db = max(-40.0, min(0.0, -10.0 + self.movie_vol_db))
+                # Режим быстрого редактирования: реальные пики декодированных буферов
+                now = time.monotonic()
+                movie_db = self._rt_level_at(self._rt_movie_peak_db, self._rt_movie_peak_ts, now)
+                comm_db = self._rt_level_at(self._rt_comm_peak_db, self._rt_comm_peak_ts, now)
+                self._rt_movie_peak_db, self._rt_movie_peak_ts = movie_db, now
+                self._rt_comm_peak_db, self._rt_comm_peak_ts = comm_db, now
+
+                movie_lin = 0.0
+                if not self.movie_muted and movie_db > -60.0:
+                    movie_lin = (10.0 ** (movie_db / 20.0)) * max(0.0, min(1.0, self.current_applied_movie_vol))
+
+                comm_lin = 0.0
+                if not self.comm_muted and comm_db > -60.0:
+                    comm_lin = (10.0 ** (comm_db / 20.0)) * max(0.0, min(1.0, self.current_applied_comm_vol))
+
+                total_lin = movie_lin + comm_lin
+                if total_lin > 0.0001:
+                    level_db = max(-60.0, min(0.0, 20.0 * math.log10(total_lin)))
+                else:
+                    level_db = -60.0
 
             self.level_changed.emit(level_db)
 
@@ -562,6 +672,7 @@ class VideoPlayerWidget(QWidget):
                 self.player.pause()
         elif status == QMediaPlayer.EndOfMedia:
             # Видео дошло до конца - останавливаем воспроизведение без зацикливания
+            self._reset_rt_peaks()
             self.pause()
             if self.is_using_master_audio:
                 self.master_audio_player.stop()
@@ -593,6 +704,8 @@ class VideoPlayerWidget(QWidget):
         """Останавливает воспроизведение аудио тифлокомментария и освобождает файл."""
         self.comm_player.stop()
         self.comm_player.setSource(QUrl())
+        self._rt_comm_peak_db = -60.0
+        self._rt_comm_peak_ts = time.monotonic()
         self.last_played_comm_id = ""
         self.current_comm_audio_file = ""
         self.pending_comm_offset_ms = 0
@@ -635,6 +748,7 @@ class VideoPlayerWidget(QWidget):
         self.is_using_master_audio = False
         self.master_audio_path = ""
         self._master_peak_envelope = None
+        self._reset_rt_peaks()
         self.master_audio_player.stop()
         self.master_audio_player.setSource(QUrl())
         self.audio_output.setVolume(0.0 if self.movie_muted else self.current_applied_movie_vol)
@@ -645,6 +759,7 @@ class VideoPlayerWidget(QWidget):
         self.player.setSource(QUrl())
         self.clear_master_audio()
         self.stop_comm_audio()
+        self._reset_rt_peaks()
         self.commentaries = []
         self.lbl_subtitle.setText("")
         self.lbl_subtitle.hide()
@@ -661,6 +776,7 @@ class VideoPlayerWidget(QWidget):
         if not os.path.isfile(media_path):
             return
         self.stop_comm_audio()
+        self._reset_rt_peaks()
         self.commentaries = commentaries or []
         self.player.setSource(QUrl.fromLocalFile(media_path))
         self.player.pause()
@@ -754,7 +870,31 @@ class VideoPlayerWidget(QWidget):
             self.fs_window.btn_play.setText("Воспроизведение")
             self.fs_window.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
 
-    def set_position(self, position_ms: int):
+    def set_position(self, position_ms: int, deferred: bool = False):
+        """Перематывает медиа на заданную позицию.
+
+        deferred=True используется для перемотки из обработчиков мыши и клавиатуры:
+        сама перемотка выполняется на следующем цикле событий, когда очередь ввода свободна.
+        Иначе UIA-событие слайдера внутри обработчика мыши приводит к зависанию.
+        """
+        position_ms = max(0, int(position_ms))
+        if deferred:
+            self._pending_seek_ms = position_ms
+            if not self._seek_scheduled:
+                self._seek_scheduled = True
+                QTimer.singleShot(0, self._apply_pending_seek)
+            return
+        self._do_set_position(position_ms)
+
+    def _apply_pending_seek(self):
+        self._seek_scheduled = False
+        ms = self._pending_seek_ms
+        self._pending_seek_ms = None
+        if ms is None:
+            return
+        self._do_set_position(ms)
+
+    def _do_set_position(self, position_ms: int):
         if self.player.playbackState() == QMediaPlayer.StoppedState:
             self.player.pause()
         self.player.setPosition(position_ms)
@@ -768,17 +908,43 @@ class VideoPlayerWidget(QWidget):
         cur = self.player.position()
         dur = self.player.duration()
         new_pos = max(0, min(dur, cur + delta_ms))
-        self.set_position(new_pos)
+        self.set_position(new_pos, deferred=True)
+
+    def _schedule_slider_update(self, pos_ms: int):
+        """Отложенно обновляет слайдер позиции, вне обработчика ввода."""
+        if self.slider_pos.isSliderDown():
+            return
+        self._pending_slider_ms = int(pos_ms)
+        if self._slider_update_scheduled:
+            return
+        self._slider_update_scheduled = True
+        QTimer.singleShot(0, self._flush_slider_update)
+
+    def _flush_slider_update(self):
+        self._slider_update_scheduled = False
+        ms = self._pending_slider_ms
+        self._pending_slider_ms = None
+        if ms is None or self.slider_pos.isSliderDown():
+            return
+        self.slider_pos.setValue(ms)
 
     def on_player_position_changed(self, pos_ms: int):
+        if self._in_position_update:
+            return
+        self._in_position_update = True
+        try:
+            self._handle_player_position_changed(pos_ms)
+        finally:
+            self._in_position_update = False
+
+    def _handle_player_position_changed(self, pos_ms: int):
         dur_ms = self.player.duration()
         # Если позиция достигла конца медиа, принудительно останавливаем
         if dur_ms > 0 and pos_ms >= dur_ms and self.player.playbackState() == QMediaPlayer.PlayingState:
             self._on_player_media_status_changed(QMediaPlayer.EndOfMedia)
             return
 
-        if not self.slider_pos.isSliderDown():
-            self.slider_pos.setValue(pos_ms)
+        self._schedule_slider_update(pos_ms)
         self.position_changed.emit(pos_ms)
         self.update_time_label(pos_ms, dur_ms)
 

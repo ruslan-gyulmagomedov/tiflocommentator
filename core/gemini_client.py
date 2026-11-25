@@ -124,11 +124,97 @@ def _record_token_usage(model_name: str, response: Any):
         print(f"Предупреждение при фиксации расхода токенов: {e}")
 
 
+def _parse_wav_chunks(data):
+    """Извлекает чанки fmt и data из RIFF/WAVE-контейнера."""
+    if len(data) < 44 or data[:4] != b'RIFF' or data[8:12] != b'WAVE':
+        return None, None
+    pos = 12
+    fmt = None
+    pcm = None
+    while pos + 8 <= len(data):
+        chunk_id = data[pos:pos + 4]
+        chunk_size = int.from_bytes(data[pos + 4:pos + 8], 'little')
+        body = data[pos + 8:pos + 8 + chunk_size]
+        if chunk_id == b'fmt ' and fmt is None:
+            fmt = body
+        elif chunk_id == b'data':
+            pcm = body
+            break
+        pos += 8 + chunk_size + (chunk_size & 1)
+    return fmt, pcm
+
+
+def _save_gemini_tts_wav(audio_data, mime_type, output_wav_path):
+    """
+    Сохраняет ответ Gemini TTS в корректный WAV-файл.
+
+    Новые TTS-модели возвращают готовый WAV-контейнер (audio/wav), в котором
+    после чанка data может лежать служебный чанк метаданных C2PA. Если записать
+    весь контейнер как сырой PCM, заголовок даёт щелчок в начале, а метаданные
+    в конце — короткий белый шум. Поэтому берём только fmt и data.
+    Старые модели возвращают сырой PCM (audio/L16), его пишем как раньше.
+    """
+    fmt, pcm = _parse_wav_chunks(audio_data)
+    if fmt is not None and pcm:
+        if len(fmt) < 16:
+            return False
+        audio_format = int.from_bytes(fmt[0:2], 'little')
+        channels = int.from_bytes(fmt[2:4], 'little')
+        sample_rate = int.from_bytes(fmt[4:8], 'little')
+        bits = int.from_bytes(fmt[14:16], 'little')
+        if audio_format not in (1, 65534) or channels < 1 or sample_rate < 8000 or bits % 8:
+            return False
+        if audio_format == 65534 and len(fmt) >= 20:
+            valid_bits = int.from_bytes(fmt[18:20], 'little')
+            if valid_bits:
+                bits = valid_bits
+        with wave.open(output_wav_path, 'wb') as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(bits // 8)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm)
+        return True
+    sample_rate = 24000
+    rate_match = re.search(r'rate=(\d+)', mime_type or '')
+    if rate_match:
+        sample_rate = int(rate_match.group(1))
+    with wave.open(output_wav_path, 'wb') as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(audio_data)
+    return True
+
+
+def is_region_error(err_str):
+    """Проверяет, что Google действительно сообщает об ограничении по региону.
+
+    Google присылает текст вида:
+    «400 FAILED_PRECONDITION: User location is not supported for the API use».
+    Любые другие ошибки (баланс, квоты, неверный ключ, лимиты) не должны
+    выдаваться за региональное ограничение.
+    """
+    low = (err_str or '').lower()
+    return ('user location is not supported' in low
+            or 'location is not supported' in low
+            or 'unsupported user location' in low)
+
+
+def format_gemini_error(err_str, proxy_hint):
+    """Возвращает реальный текст ошибки Google и подсказку про прокси.
+
+    Подсказка добавляется только для настоящей региональной ошибки.
+    """
+    real = (err_str or '').strip() or 'Google Gemini вернул ошибку без описания.'
+    return f"{real}\n\n{proxy_hint}"
+
+
 class GeminiClient:
     """Клиент для взаимодействия с Google Gemini API."""
 
     def __init__(self, api_key: str):
         self.api_key = api_key.strip()
+        self.last_error = ""
         from core.proxy_manager import ensure_proxy_configured
         ensure_proxy_configured()
 
@@ -198,11 +284,12 @@ class GeminiClient:
         except Exception as e:
             err_str = str(e)
             print(f"Ошибка получения списка моделей: {err_str}")
-            if "User location is not supported" in err_str or "location" in err_str.lower() or "400" in err_str:
-                raise RuntimeError(
-                    "Google Gemini недоступен для прямого подключения в вашем регионе.\n"
-                    "Пожалуйста, убедитесь, что в Windows включен прокси-сервер или укажите рабочий прокси в Настройках программы (Вкладка «Сеть и Прокси»)."
-                ) from e
+            if is_region_error(err_str):
+                raise RuntimeError(format_gemini_error(
+                    err_str,
+                    "Google ограничивает доступ из вашего региона. Проверьте прокси-сервер: "
+                    "Настройки -> Сеть и Прокси."
+                )) from e
             raise
 
     def upload_file_and_wait(self, filepath: str, progress_callback: Optional[Callable[[str], None]] = None) -> Any:
@@ -218,11 +305,12 @@ class GeminiClient:
         except Exception as e:
             err_str = str(e)
             print(f"Ошибка загрузки файла в Gemini API: {err_str}")
-            if "User location is not supported" in err_str or "location" in err_str.lower() or "400" in err_str:
-                raise RuntimeError(
-                    "Google Gemini недоступен для прямого подключения в вашем регионе (User location is not supported).\n"
-                    "Пожалуйста, убедитесь, что в Windows включен рабочий прокси-сервер или укажите пользовательский прокси в меню Настройки -> Сеть и Прокси."
-                ) from e
+            if is_region_error(err_str):
+                raise RuntimeError(format_gemini_error(
+                    err_str,
+                    "Google ограничивает доступ из вашего региона. Проверьте прокси-сервер: "
+                    "Настройки -> Сеть и Прокси."
+                )) from e
             raise
 
         if progress_callback:
@@ -234,11 +322,12 @@ class GeminiClient:
                 uploaded_file = genai.get_file(uploaded_file.name)
             except Exception as e:
                 err_str = str(e)
-                if "User location is not supported" in err_str or "location" in err_str.lower():
-                    raise RuntimeError(
-                        "Google Gemini недоступен для прямого подключения в вашем регионе.\n"
-                        "Пожалуйста, проверьте настройки прокси-сервера (Настройки -> Сеть и Прокси)."
-                    ) from e
+                if is_region_error(err_str):
+                    raise RuntimeError(format_gemini_error(
+                        err_str,
+                        "Google ограничивает доступ из вашего региона. Проверьте прокси-сервер: "
+                        "Настройки -> Сеть и Прокси."
+                    )) from e
                 raise
 
         if uploaded_file.state.name == "FAILED":
@@ -540,7 +629,13 @@ class GeminiClient:
 
         try:
             model = genai.GenerativeModel(model_name=model_name)
-            prompt = f"Please read the following Russian audio description text clearly and expressively with high quality:\n{text}"
+
+            # Служебную английскую фразу не добавляем: новые TTS-модели
+            # читают её вслух перед русским текстом.
+            prompt = (text or "").strip()
+            if not prompt:
+                return False
+            print(f"Gemini TTS: model={model_name}, voice={voice_name or 'Puck'}, chars={len(prompt)}")
 
             gen_config = {
                 "response_modalities": ["AUDIO"],
@@ -560,41 +655,52 @@ class GeminiClient:
                 for part in candidate.content.parts:
                     if hasattr(part, "inline_data") and part.inline_data:
                         audio_data = part.inline_data.data
-                        # Сохраняем PCM в стандартный WAV файл
+                        mime_type = getattr(part.inline_data, "mime_type", "") or ""
                         try:
-                            with wave.open(output_wav_path, "wb") as wav_file:
-                                wav_file.setnchannels(1)
-                                wav_file.setsampwidth(2)  # 16 бит
-                                wav_file.setframerate(24000)
-                                wav_file.writeframes(audio_data)
-                            return True
+                            if _save_gemini_tts_wav(audio_data, mime_type, output_wav_path):
+                                try:
+                                    with wave.open(output_wav_path, "rb") as wav_file:
+                                        duration = wav_file.getnframes() / float(wav_file.getframerate())
+                                    print(f"Gemini TTS: OK, mime={mime_type}, bytes={len(audio_data)}, "
+                                          f"wav={duration:.2f}s -> {output_wav_path}")
+                                except Exception:
+                                    pass
+                                return True
                         except Exception as wav_err:
                             print(f"Предупреждение при записи wave: {wav_err}, попытка через FFmpeg...")
-                            temp_audio = output_wav_path + ".temp"
-                            with open(temp_audio, "wb") as f:
-                                f.write(audio_data)
+
+                        temp_audio = output_wav_path + (".src.wav" if audio_data[:4] == b"RIFF" else ".src.pcm")
+                        with open(temp_audio, "wb") as f:
+                            f.write(audio_data)
+                        try:
                             from core.app_paths import get_ffmpeg_path
                             import subprocess
                             ffmpeg = get_ffmpeg_path()
-                            cmd = [ffmpeg, "-y", "-i", temp_audio, "-ar", "44100", "-ac", "2", output_wav_path]
+                            cmd = [ffmpeg, "-y"]
+                            if audio_data[:4] != b"RIFF":
+                                cmd += ["-f", "s16le", "-ar", "24000", "-ac", "1"]
+                            cmd += ["-i", temp_audio, "-ar", "44100", "-ac", "2", output_wav_path]
                             startupinfo = None
                             if os.name == 'nt':
                                 startupinfo = subprocess.STARTUPINFO()
                                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                             subprocess.run(cmd, startupinfo=startupinfo, check=True)
+                            return (os.path.isfile(output_wav_path)
+                                    and os.path.getsize(output_wav_path) > 44)
+                        finally:
                             if os.path.exists(temp_audio):
                                 os.remove(temp_audio)
-                            return True
-
             return False
         except Exception as e:
             err_str = str(e)
             print(f"Ошибка Gemini TTS синтеза: {err_str}")
-            if "User location is not supported" in err_str or "location" in err_str.lower():
-                raise RuntimeError(
-                    "Google Gemini недоступен для прямого подключения в вашем регионе.\n"
-                    "Пожалуйста, проверьте настройки прокси-сервера (Настройки -> Сеть и Прокси)."
-                ) from e
+            self.last_error = err_str
+            if is_region_error(err_str):
+                raise RuntimeError(format_gemini_error(
+                    err_str,
+                    "Google ограничивает доступ из вашего региона. Проверьте прокси-сервер: "
+                    "Настройки -> Сеть и Прокси."
+                )) from e
             return False
 
 

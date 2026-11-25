@@ -38,6 +38,14 @@ class VisualTimelineCanvas(QWidget):
     selection_changed = Signal(float, float)
     fragment_commentary_requested = Signal(float, float)
 
+    # Множественное выделение комментариев
+    multi_selection_changed = Signal(list)
+    commentary_delete_requested = Signal(list)
+    commentary_audio_delete_requested = Signal(list)
+    commentary_edit_requested = Signal(str)
+    commentary_voice_requested = Signal(list, str)
+    add_commentary_requested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.commentaries: List[Dict[str, Any]] = []
@@ -50,8 +58,18 @@ class VisualTimelineCanvas(QWidget):
         self.is_selecting_range: bool = False
         self.range_select_origin_x: float = 0.0
 
+        # Выделение нескольких комментариев
+        self.selected_comm_ids: List[str] = []
+        self.selection_anchor_id: Optional[str] = None
+        self.is_band_selecting: bool = False
+        self.band_origin_x: float = 0.0
+        self.band_cur_x: float = 0.0
+        self.band_moved: bool = False
+        self.band_additive: bool = False
+        self.band_base_ids: List[str] = []
+
         # Масштабирование и видимый диапазон
-        self.zoom_level: float = 1.0       # от 1.0 (весь проект) до 50.0
+        self.zoom_level: float = 1.0
         self.view_start_sec: float = 0.0
 
         self.dragging_comm_id: Optional[str] = None
@@ -67,14 +85,7 @@ class VisualTimelineCanvas(QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAccessibleName("Графический таймлайн тифлокомментариев")
         self.setAccessibleDescription(
-            "Интерактивная шкала времени с фокусом клавиатуры. "
-            "Клавиши: Пробел — Воспроизведение/Пауза, "
-            "I — точка входа выделения, O — точка выхода выделения, Esc — сброс выделения, "
-            "Ctrl+Shift+G — комментировать выделенный фрагмент, "
-            "PageUp/PageDown — на экран назад/вперед, "
-            "Home/End — в начало/конец, "
-            "Стрелки влево/вправо — перемотка на 5 секунд. "
-            "Ctrl + Колесо мыши — масштабирование."
+            "Интерактивная шкала времени с фокусом клавиатуры. Клавиши: Пробел — Воспроизведение/Пауза, I — точка входа выделения, O — точка выхода выделения, Esc — сброс выделения, Ctrl+Shift+G — комментировать выделенный фрагмент, Ctrl+клик по комментарию — добавить его в выделение, протягивание мышью от пустого места — выделить рамкой несколько комментариев, Delete — удалить выделенные комментарии, Shift+Delete — удалить их озвучку, Enter — редактировать текст, Ctrl+T или Insert — добавить комментарий, Ctrl+A — выделить все комментарии, PageUp/PageDown — на экран назад/вперед, Home/End — в начало/конец, Стрелки влево/вправо — перемотка на 5 секунд. Ctrl + Колесо мыши — масштабирование."
         )
 
     def set_in_point(self, pos_sec: Optional[float] = None):
@@ -114,6 +125,77 @@ class VisualTimelineCanvas(QWidget):
                 return (st, et)
         return None
 
+    def get_selected_comm_ids(self) -> List[str]:
+        """Возвращает идентификаторы выделенных комментариев, отбрасывая уже удалённые."""
+        existing = set(str(c.get("id")) for c in self.commentaries if c.get("id"))
+        return [cid for cid in self.selected_comm_ids if cid in existing]
+
+    def set_selected_comm_ids(self, ids: Optional[List[str]], emit: bool = True,
+                              anchor: Optional[str] = None):
+        """Задаёт набор выделенных комментариев и уведомляет об изменении."""
+        seen = set()
+        new_ids: List[str] = []
+        for cid in (ids or []):
+            cid = str(cid)
+            if not cid:
+                continue
+            if cid in seen:
+                continue
+            seen.add(cid)
+            new_ids.append(cid)
+        self.selected_comm_ids = new_ids
+        if anchor is not None:
+            self.selection_anchor_id = anchor
+        elif new_ids:
+            if self.selection_anchor_id not in new_ids:
+                self.selection_anchor_id = new_ids[-1]
+        else:
+            self.selection_anchor_id = None
+        if emit:
+            self.multi_selection_changed.emit(list(self.selected_comm_ids))
+        self.update()
+
+    def clear_comment_selection(self, emit: bool = True):
+        """Снимает выделение всех комментариев (не трогая выделение фрагмента)."""
+        if self.selected_comm_ids or self.selection_anchor_id:
+            self.set_selected_comm_ids([], emit=emit)
+
+    def toggle_comment_selection(self, comm_id: str):
+        """Добавляет или убирает комментарий из выделения (Ctrl+клик)."""
+        cid = str(comm_id)
+        ids = self.get_selected_comm_ids()
+        if cid in ids:
+            ids.remove(cid)
+            anchor = ids[-1] if ids else None
+        else:
+            ids.append(cid)
+            anchor = cid
+        self.set_selected_comm_ids(ids, anchor=anchor)
+
+    def select_all_comments(self):
+        """Выделяет все комментарии проекта (Ctrl+A)."""
+        self.set_selected_comm_ids([c.get("id") for c in self.commentaries if c.get("id")])
+
+    def _comment_at(self, pos: QPointF) -> Optional[Dict[str, Any]]:
+        """Возвращает комментарий под указателем мыши или None."""
+        for comm in reversed(self.commentaries):
+            if self.get_comment_rect(comm).contains(pos):
+                return comm
+        return None
+
+    def _apply_band_selection(self):
+        """Выделяет все комментарии, попавшие в прямоугольник протягивания."""
+        x1 = min(self.band_origin_x, self.band_cur_x)
+        x2 = max(self.band_origin_x, self.band_cur_x)
+        ids = list(self.band_base_ids) if self.band_additive else []
+        for comm in self.commentaries:
+            rect = self.get_comment_rect(comm)
+            if rect.right() >= x1 and rect.left() <= x2:
+                cid = comm.get("id")
+                if cid and str(cid) not in ids:
+                    ids.append(str(cid))
+        self.set_selected_comm_ids(ids)
+
     def format_sec_short(self, sec: float) -> str:
         m, s = divmod(int(sec), 60)
         hh, m = divmod(m, 60)
@@ -124,7 +206,18 @@ class VisualTimelineCanvas(QWidget):
 
     def set_duration(self, duration_sec: float):
         self.total_duration_sec = max(1.0, duration_sec)
+        if self.zoom_level > self.get_max_zoom():
+            self.zoom_level = self.get_max_zoom()
+            self.zoom_changed.emit(self.zoom_level)
         self.clamp_view()
+
+    def get_max_zoom(self) -> float:
+        """
+        Максимальный масштаб не привязан к фиксированному числу:
+        он растёт вместе с длительностью и останавливается, когда
+        на всём видимом отрезке таймлайна остаётся ровно 1 секунда видео.
+        """
+        return max(1.0, float(self.total_duration_sec) / 1.0)
 
     def set_max_speedup(self, val: float):
         """Устанавливает максимально допустимое ускорение речи для расчёта лимита ресайза."""
@@ -147,6 +240,13 @@ class VisualTimelineCanvas(QWidget):
 
     def set_commentaries(self, commentaries: List[Dict[str, Any]]):
         self.commentaries = commentaries or []
+        existing = set(str(c.get("id")) for c in self.commentaries if c.get("id"))
+        pruned = [cid for cid in self.selected_comm_ids if cid in existing]
+        if pruned != self.selected_comm_ids:
+            self.selected_comm_ids = pruned
+            if self.selection_anchor_id not in pruned:
+                self.selection_anchor_id = pruned[-1] if pruned else None
+            self.multi_selection_changed.emit(list(self.selected_comm_ids))
         self.update()
 
     def clamp_view(self):
@@ -173,7 +273,7 @@ class VisualTimelineCanvas(QWidget):
         return QRectF(x1, 35, max(6.0, x2 - x1), 55)
 
     def set_zoom(self, zoom: float, center_time: Optional[float] = None):
-        new_zoom = max(1.0, min(50.0, zoom))
+        new_zoom = max(1.0, min(self.get_max_zoom(), zoom))
         if new_zoom == self.zoom_level and new_zoom == 1.0:
             return
 
@@ -204,7 +304,7 @@ class VisualTimelineCanvas(QWidget):
             mouse_time = self.x_to_sec(mouse_x)
 
             factor = 1.25 ** num_steps
-            new_zoom = max(1.0, min(50.0, self.zoom_level * factor))
+            new_zoom = max(1.0, min(self.get_max_zoom(), self.zoom_level * factor))
             self.set_zoom(new_zoom, center_time=mouse_time)
             event.accept()
         else:
@@ -218,7 +318,7 @@ class VisualTimelineCanvas(QWidget):
             else:
                 super().wheelEvent(event)
 
-    def _draw_comment_block(self, painter: QPainter, comm: Dict[str, Any], vis_dur: float, is_dragged: bool = False):
+    def _draw_comment_block(self, painter: QPainter, comm: Dict[str, Any], vis_dur: float, is_dragged: bool = False, is_selected: bool = False):
         st = float(comm.get("start_time") or 0.0)
         et = float(comm.get("end_time") or (st + 2.0))
         if et < self.view_start_sec or st > self.view_start_sec + vis_dur:
@@ -239,8 +339,17 @@ class VisualTimelineCanvas(QWidget):
             border_color = QColor(255, 255, 0) if is_dragged else QColor(70, 220, 140)
 
         painter.setBrush(QBrush(bg_color))
-        painter.setPen(QPen(border_color, 2.5 if is_dragged else 1.5))
+        if is_selected:
+            border_color = QColor(255, 240, 120)
+        pen_width = 3.0 if is_selected else (2.5 if is_dragged else 1.5)
+        painter.setPen(QPen(border_color, pen_width))
         painter.drawRoundedRect(rect, 4, 4)
+
+        # Дополнительная подсветка выделенного блока
+        if is_selected:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 255, 220), 1))
+            painter.drawRoundedRect(rect.adjusted(-1.5, -1.5, 1.5, 1.5), 5, 5)
 
         # Правый край (ручка изменения размера)
         painter.setBrush(QBrush(QColor(255, 255, 0 if is_dragged else 255, 200)))
@@ -316,15 +425,37 @@ class VisualTimelineCanvas(QWidget):
             t += step_sec
 
         # Отрисовка блоков тифлокомментариев (перетаскиваемый рисуется поверх остальных)
+        selected_ids = set(self.get_selected_comm_ids())
         dragged_comm = None
         for comm in self.commentaries:
             if comm.get("id") == self.dragging_comm_id and self.has_dragged:
                 dragged_comm = comm
                 continue
-            self._draw_comment_block(painter, comm, vis_dur, is_dragged=False)
+            self._draw_comment_block(painter, comm, vis_dur, is_dragged=False, is_selected=str(comm.get("id")) in selected_ids)
 
         if dragged_comm:
-            self._draw_comment_block(painter, dragged_comm, vis_dur, is_dragged=True)
+            self._draw_comment_block(painter, dragged_comm, vis_dur, is_dragged=True, is_selected=str(dragged_comm.get("id")) in selected_ids)
+
+        # Рамка выделения нескольких комментариев
+        if self.is_band_selecting and self.band_moved:
+            bx1 = min(self.band_origin_x, self.band_cur_x)
+            bx2 = max(self.band_origin_x, self.band_cur_x)
+            band = QRectF(bx1, 30, max(2.0, bx2 - bx1), 62)
+            painter.fillRect(band, QColor(255, 255, 255, 35))
+            painter.setPen(QPen(QColor(255, 255, 255, 190), 1, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(band)
+
+        # Счётчик выделенных комментариев
+        sel_count = len(selected_ids)
+        if sel_count:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(70, 62, 0, 220)))
+            badge = QRectF(w - 150, 2, 142, 18)
+            painter.drawRoundedRect(badge, 4, 4)
+            painter.setPen(QColor(255, 240, 120))
+            painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+            painter.drawText(badge, Qt.AlignCenter, f"Выделено: {sel_count}")
 
         # Текущий указатель воспроизведения (красная линия)
         if self.view_start_sec <= self.current_pos_sec <= self.view_start_sec + vis_dur:
@@ -352,6 +483,8 @@ class VisualTimelineCanvas(QWidget):
 
             # Выделение диапазона с зажатым Shift
             if event.modifiers() & Qt.ShiftModifier:
+                self.is_band_selecting = False
+                self.band_moved = False
                 self.is_selecting_range = True
                 self.range_select_origin_x = x
                 self.sel_start_sec = sec
@@ -360,25 +493,56 @@ class VisualTimelineCanvas(QWidget):
                 self.update()
                 return
 
-            # Проверяем клик по блокам комментариев для возможного перетаскивания/ресайза
-            for comm in reversed(self.commentaries):
-                rect = self.get_comment_rect(comm)
-                if rect.contains(event.position()):
-                    if abs(x - rect.right()) <= 8:
-                        self.resizing_comm_id = comm.get("id")
-                    else:
-                        self.dragging_comm_id = comm.get("id")
-                    self.drag_start_mouse_x = x
-                    self.drag_orig_start = float(comm.get("start_time", 0.0))
-                    self.drag_orig_end = float(comm.get("end_time", 0.0))
-                    break
+            ctrl = bool(event.modifiers() & Qt.ControlModifier)
+            comm = self._comment_at(event.position())
 
-            # Если кликнули мимо блоков комментариев, перемещаем курсор воспроизведения
-            if not self.dragging_comm_id and not self.resizing_comm_id:
-                self.seek_requested.emit(int(sec * 1000))
+            if comm is not None:
+                cid = str(comm.get("id"))
+                rect = self.get_comment_rect(comm)
+
+                # Ctrl+клик — добавить/убрать комментарий из выделения
+                if ctrl:
+                    self.toggle_comment_selection(cid)
+                    return
+
+                # Обычный клик — выделить только этот блок
+                if cid not in self.get_selected_comm_ids():
+                    self.set_selected_comm_ids([cid], anchor=cid)
+                else:
+                    self.selection_anchor_id = cid
+
+                if abs(x - rect.right()) <= 8:
+                    self.resizing_comm_id = cid
+                else:
+                    self.dragging_comm_id = cid
+                self.drag_start_mouse_x = x
+                self.drag_orig_start = float(comm.get("start_time", 0.0))
+                self.drag_orig_end = float(comm.get("end_time", 0.0))
+                self.update()
+                return
+
+            # Клик по пустому месту — начало рамки выделения
+            if not ctrl:
+                self.clear_comment_selection()
+            self.is_band_selecting = True
+            self.band_moved = False
+            self.band_origin_x = x
+            self.band_cur_x = x
+            self.band_additive = ctrl
+            self.band_base_ids = self.get_selected_comm_ids() if ctrl else []
+            self.update()
 
     def mouseMoveEvent(self, event):
         x = event.position().x()
+        if self.is_band_selecting:
+            if not self.band_moved and abs(x - self.band_origin_x) > 3:
+                self.band_moved = True
+            self.band_cur_x = x
+            if self.band_moved:
+                self._apply_band_selection()
+            self.update()
+            return
+
         if self.is_selecting_range:
             t1 = self.x_to_sec(self.range_select_origin_x)
             t2 = self.x_to_sec(x)
@@ -434,6 +598,18 @@ class VisualTimelineCanvas(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
+            if self.is_band_selecting:
+                self.is_band_selecting = False
+                if self.band_moved:
+                    self._apply_band_selection()
+                    self.band_moved = False
+                    self.update()
+                    return
+                self.band_moved = False
+                sec = self.x_to_sec(event.position().x())
+                self.seek_requested.emit(int(sec * 1000))
+                self.update()
+                return
             if self.is_selecting_range:
                 self.is_selecting_range = False
                 if self.sel_start_sec is not None and self.sel_end_sec is not None:
@@ -475,19 +651,45 @@ class VisualTimelineCanvas(QWidget):
     def contextMenuEvent(self, event):
         pos = event.pos()
         sec = self.x_to_sec(pos.x())
-        for comm in reversed(self.commentaries):
-            rect = self.get_comment_rect(comm)
-            if rect.contains(QPointF(pos)):
-                self.context_menu_requested.emit(comm.get("id"), event.globalPos())
-                event.accept()
-                return
+        comm = self._comment_at(QPointF(pos))
+        if comm is not None:
+            cid = str(comm.get("id"))
+            if cid in self.get_selected_comm_ids():
+                self.set_selected_comm_ids([cid], anchor=cid)
+            self.context_menu_requested.emit(cid, event.globalPos())
+            event.accept()
+            return
         self.canvas_context_menu_requested.emit(event.globalPos(), sec)
         event.accept()
 
     def keyPressEvent(self, event):
         key = event.key()
         modifiers = event.modifiers()
-        if key == Qt.Key_Space:
+        if key in (Qt.Key_Delete, Qt.Key_Backspace):
+            ids = self.get_selected_comm_ids()
+            if ids:
+                if modifiers & (Qt.ShiftModifier | Qt.ControlModifier):
+                    self.commentary_audio_delete_requested.emit(ids)
+                else:
+                    self.commentary_delete_requested.emit(ids)
+                event.accept()
+            return
+        elif key in (Qt.Key_Return, Qt.Key_Enter):
+            ids = self.get_selected_comm_ids()
+            if ids:
+                target = self.selection_anchor_id if self.selection_anchor_id in ids else ids[0]
+                self.commentary_edit_requested.emit(target)
+                event.accept()
+            return
+        elif key == Qt.Key_Insert or (key == Qt.Key_T and (modifiers & Qt.ControlModifier)):
+            self.add_commentary_requested.emit()
+            event.accept()
+            return
+        elif key == Qt.Key_A and (modifiers & Qt.ControlModifier):
+            self.select_all_comments()
+            event.accept()
+            return
+        elif key == Qt.Key_Space:
             self.play_pause_requested.emit()
             event.accept()
             return
@@ -500,6 +702,7 @@ class VisualTimelineCanvas(QWidget):
             event.accept()
             return
         elif key == Qt.Key_Escape:
+            self.clear_comment_selection()
             self.clear_selection()
             event.accept()
             return
@@ -568,7 +771,6 @@ class VisualTimelineCanvas(QWidget):
         super().keyPressEvent(event)
 
 
-
 class AccessibleTimelineWidget(QWidget):
     """
     Интерактивный виджет таймлайна с панелью масштабирования, выделением фрагментов и контекстным меню.
@@ -616,6 +818,12 @@ class AccessibleTimelineWidget(QWidget):
         self.canvas.zoom_changed.connect(self.on_zoom_changed)
         self.canvas.selection_changed.connect(self.on_selection_changed)
         self.canvas.fragment_commentary_requested.connect(self.fragment_commentary_requested.emit)
+        self.canvas.multi_selection_changed.connect(self.on_multi_selection_changed)
+        self.canvas.commentary_delete_requested.connect(self.delete_selected_commentaries)
+        self.canvas.commentary_audio_delete_requested.connect(self.delete_selected_audio)
+        self.canvas.commentary_edit_requested.connect(self.edit_commentary_by_id)
+        self.canvas.add_commentary_requested.connect(self.add_commentary_requested.emit)
+        self.canvas.commentary_voice_requested.connect(self.commentaries_resynthesize_requested.emit)
         layout.addWidget(self.canvas, 1)
 
         # Нижняя строка управления масштабом и выделением фрагментов
@@ -639,6 +847,14 @@ class AccessibleTimelineWidget(QWidget):
         self.lbl_selection.setStyleSheet("font-size: 11px; color: #88CCFF;")
         self.lbl_selection.setAccessibleName("Информация о выделенном диапазоне")
         bar_layout.addWidget(self.lbl_selection)
+
+        self.lbl_comm_selection = QLabel("Выделено комментариев: 0", self)
+        self.lbl_comm_selection.setStyleSheet("font-size: 11px; color: #FFE066;")
+        self.lbl_comm_selection.setAccessibleName("Счётчик выделенных комментариев")
+        self.lbl_comm_selection.setToolTip(
+            "Ctrl+клик по блоку — добавить в выделение; протягивание мышью от пустого места — рамка; "
+            "Ctrl+A — выделить все; Esc — снять выделение")
+        bar_layout.addWidget(self.lbl_comm_selection)
 
         self.btn_clear_selection = QPushButton("❌ Сбросить", self)
         self.btn_clear_selection.setEnabled(False)
@@ -672,7 +888,8 @@ class AccessibleTimelineWidget(QWidget):
         layout.addLayout(bar_layout)
 
     def on_zoom_changed(self, zoom: float):
-        self.lbl_zoom.setText(f"🔍 {zoom:.1f}x")
+        visible = self.canvas.total_duration_sec / max(1.0, zoom)
+        self.lbl_zoom.setText(f"🔍 {zoom:.1f}x (видно {self.canvas.format_sec_short(visible)})")
 
     def on_selection_changed(self, start_sec: float, end_sec: float):
         dur = max(0.0, end_sec - start_sec)
@@ -686,6 +903,13 @@ class AccessibleTimelineWidget(QWidget):
             self.lbl_selection.setText("Фрагмент не выделен (Shift+Мышь или I / O)")
             self.btn_comment_fragment.setEnabled(False)
             self.btn_clear_selection.setEnabled(False)
+
+    def on_multi_selection_changed(self, ids: list):
+        count = len(ids or [])
+        if count:
+            self.lbl_comm_selection.setText(f"Выделено комментариев: {count}")
+        else:
+            self.lbl_comm_selection.setText("Выделено комментариев: 0")
 
     def on_comment_fragment_clicked(self):
         sel = self.canvas.get_selection()
@@ -797,7 +1021,11 @@ class AccessibleTimelineWidget(QWidget):
             self.commentaries_deleted.emit(target_ids)
 
     def show_canvas_context_menu(self, comm_id: str, global_pos: QPoint):
-        self.show_context_menu_for_ids([comm_id], global_pos)
+        ids = self.canvas.get_selected_comm_ids()
+        if comm_id in ids:
+            ids = [comm_id]
+            self.canvas.set_selected_comm_ids([comm_id], anchor=comm_id)
+        self.show_context_menu_for_ids(ids, global_pos)
 
     def show_empty_context_menu(self, global_pos: QPoint, sec: float):
         menu = QMenu(self)
@@ -835,6 +1063,15 @@ class AccessibleTimelineWidget(QWidget):
 
         menu = QMenu(self)
         count = len(comm_ids)
+
+        act_sel_all = QAction("✅ Выделить все комментарии (Ctrl+A)", self)
+        act_sel_all.triggered.connect(self.canvas.select_all_comments)
+        menu.addAction(act_sel_all)
+
+        act_clear_sel = QAction("⬜ Снять выделение комментариев (Esc)", self)
+        act_clear_sel.triggered.connect(self.canvas.clear_comment_selection)
+        menu.addAction(act_clear_sel)
+        menu.addSeparator()
 
         sel = self.canvas.get_selection()
         if sel:

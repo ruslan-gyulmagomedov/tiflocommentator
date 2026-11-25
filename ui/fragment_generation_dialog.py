@@ -63,17 +63,35 @@ class FragmentGenerationWorker(QThread):
             frag_filename = f"frag_{int(self.start_sec*1000)}_{int(self.end_sec*1000)}.mp4"
             temp_frag_path = os.path.join(self.project.parts_dir, frag_filename)
 
+            frag_info = {}
             ok_cut = extract_video_fragment(
                 src_video_path=src_video,
                 start_sec=self.start_sec,
                 end_sec=self.end_sec,
                 output_path=temp_frag_path,
-                custom_ffmpeg=self.config.ffmpeg_path
+                custom_ffmpeg=self.config.ffmpeg_path,
+                custom_ffprobe=self.config.ffprobe_path,
+                align_to_keyframes=True,
+                info=frag_info
             )
 
             if not ok_cut or not os.path.isfile(temp_frag_path):
                 self.generation_error.emit("Не удалось вырезать фрагмент видео для анализа.")
                 return
+
+            # -c copy может начать фрагмент только с ключевого кадра, поэтому
+            # реальные границы могут отличаться от выделения на таймлайне.
+            # Дальше везде используем фактические границы, иначе комментарии
+            # поедут на величину сдвига.
+            actual_start = float(frag_info.get("start_sec", self.start_sec))
+            actual_end = float(frag_info.get("end_sec", self.end_sec))
+            if actual_end <= actual_start:
+                actual_end = actual_start + 0.1
+            print(
+                f"Фрагмент: выделено {self.start_sec:.3f}-{self.end_sec:.3f}, "
+                f"вырезано {actual_start:.3f}-{actual_end:.3f}, "
+                f"сдвиг начала {actual_start - self.start_sec:+.3f} с"
+            )
 
             if self.cancel_event.is_set() or self._is_cancelled:
                 self.generation_cancelled.emit()
@@ -88,8 +106,8 @@ class FragmentGenerationWorker(QThread):
 
             res_data = client.generate_commentary_for_fragment(
                 fragment_file_path=temp_frag_path,
-                start_abs_sec=self.start_sec,
-                end_abs_sec=self.end_sec,
+                start_abs_sec=actual_start,
+                end_abs_sec=actual_end,
                 existing_characters=self.project.characters,
                 fragment_prompt=self.fragment_prompt,
                 model_name=self.config.gemini_model,
@@ -107,14 +125,14 @@ class FragmentGenerationWorker(QThread):
 
             chars = res_data.get("characters", [])
             comms = res_data.get("commentaries", [])
-            frag_dur = max(0.1, self.end_sec - self.start_sec)
+            frag_dur = max(0.1, actual_end - actual_start)
 
             for char_item in chars:
                 raw_fts = char_item.get("frame_timestamp", char_item.get("frame_timestamp_sec", 0.0))
                 char_item["frame_timestamp_sec"] = parse_time_to_seconds(raw_fts, max_duration=frag_dur)
 
             if chars:
-                char_mgr.process_detected_characters(chars, temp_frag_path, self.start_sec)
+                char_mgr.process_detected_characters(chars, temp_frag_path, actual_start)
 
             for c in comms:
                 raw_start = c.get("start_time", c.get("start_time_sec", 0.0))
@@ -125,8 +143,8 @@ class FragmentGenerationWorker(QThread):
                 if rel_end <= rel_start:
                     rel_end = rel_start + 2.0
 
-                c["start_time"] = round(self.start_sec + rel_start, 3)
-                c["end_time"] = round(self.start_sec + rel_end, 3)
+                c["start_time"] = round(actual_start + rel_start, 3)
+                c["end_time"] = round(actual_start + rel_end, 3)
                 c["duration_sec"] = round(c["end_time"] - c["start_time"], 3)
                 c["audio_needs_rebuild"] = True
 
@@ -135,7 +153,11 @@ class FragmentGenerationWorker(QThread):
 
             self.generation_finished.emit({
                 "comments_count": len(comms),
-                "characters_count": len(chars)
+                "characters_count": len(chars),
+                "requested_start_sec": round(self.start_sec, 3),
+                "requested_end_sec": round(self.end_sec, 3),
+                "actual_start_sec": round(actual_start, 3),
+                "actual_end_sec": round(actual_end, 3)
             })
 
         except Exception as e:
@@ -236,11 +258,33 @@ class FragmentGenerationProgressDialog(QDialog):
         self.progress_bar.setValue(100)
         comms_cnt = res.get("comments_count", 0)
         chars_cnt = res.get("characters_count", 0)
+
+        def _hms(sec: float) -> str:
+            total = max(0, int(round(sec)))
+            h, rem = divmod(total, 3600)
+            m, s = divmod(rem, 60)
+            return f"{h:02d}:{m:02d}:{s:02d}"
+
+        bounds_note = ""
+        try:
+            req_s = float(res.get("requested_start_sec", self.start_sec))
+            req_e = float(res.get("requested_end_sec", self.end_sec))
+            act_s = float(res.get("actual_start_sec", req_s))
+            act_e = float(res.get("actual_end_sec", req_e))
+            if abs(act_s - req_s) > 0.05 or abs(act_e - req_e) > 0.05:
+                bounds_note = (
+                    f"\nГраницы фрагмента выровнены по ключевым кадрам:\n"
+                    f"выделено {_hms(req_s)}–{_hms(req_e)}, "
+                    f"обработано {_hms(act_s)}–{_hms(act_e)}.\n"
+                )
+        except Exception:
+            bounds_note = ""
+
         QMessageBox.information(
             self, "Анализ фрагмента завершен",
             f"Фрагмент успешно проанализирован!\n\n"
             f"Создано комментариев: {comms_cnt}\n"
-            f"Новых персонажей: {chars_cnt}"
+            f"Новых персонажей: {chars_cnt}{bounds_note}"
         )
         self.accept()
 

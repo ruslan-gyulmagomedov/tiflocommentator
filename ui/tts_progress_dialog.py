@@ -46,6 +46,8 @@ class TTSGenerationWorker(QThread):
         self.tts_service = tts_service
         self.cancel_event = threading.Event()
         self._is_cancelled = False
+        # Текст последней ошибки Google — показывается в итоговом отчёте окна
+        self.last_error = ""
 
     def cancel(self):
         """Отменяет генерацию речи."""
@@ -121,6 +123,12 @@ class TTSGenerationWorker(QThread):
                     last_voiced_text = comm_text
                     self.project.resolve_overlaps()
                     self.project.save()
+                else:
+                    # Дословный текст ошибки Google для итогового отчёта
+                    self.last_error = (
+                        getattr(self.tts_service, "last_error", "")
+                        or self.last_error
+                    )
 
                 if self.cancel_event.is_set() or self._is_cancelled:
                     self.tts_cancelled.emit(success_count, total)
@@ -408,16 +416,51 @@ class TTSProgressDialog(QDialog):
     def on_tts_finished(self, success_count: int, total_count: int):
         self.is_completed = True
         self.success_count = success_count
-        self.progress_bar.setValue(100)
-        self.progress_bar.setFormat(f"100% — Успешно озвучено {success_count} из {total_count}")
+        failed = max(0, total_count - success_count)
+        err_text = (getattr(self.worker, "last_error", "") or "").strip()
 
-        self.lbl_head_curr.setText("✅ Статус:")
-        self.lbl_head_curr.setStyleSheet("font-weight: bold; font-size: 13px; color: #00FF66;")
-        self.lbl_curr_text.setText(f"Озвучивание успешно завершено! Создано {success_count} аудиодорожек.")
-        self.lbl_curr_text.setStyleSheet("font-size: 13px; font-weight: bold; color: #AAFFAA; padding-left: 8px;")
+        if failed:
+            # Часть комментариев не озвучена — показываем сколько и почему
+            self.progress_bar.setValue(100)
+            self.progress_bar.setFormat(f"Озвучено {success_count} из {total_count}")
 
-        self.lbl_done_text.setText(f"Все комментарии ({success_count} шт.) успешно озвучены и синхронизированы.")
-        self.lbl_rem_text.setText("Все задачи выполнены. Аудиодорожки готовы к предпросмотру.")
+            self.lbl_head_curr.setText("⚠ Статус:")
+            self.lbl_head_curr.setStyleSheet("font-weight: bold; font-size: 13px; color: #FFAA00;")
+            self.lbl_curr_text.setText(
+                f"Озвучено {success_count} из {total_count}. Не озвучено: {failed}."
+            )
+            self.lbl_curr_text.setStyleSheet(
+                "font-size: 13px; font-weight: bold; color: #FFCC66; padding-left: 8px;"
+            )
+
+            if err_text:
+                self.lbl_rem_text.setText(f"Причина: {err_text}")
+            else:
+                self.lbl_rem_text.setText("Причина не указана, подробности в журнале программы.")
+            self.lbl_rem_text.setStyleSheet("font-size: 12px; color: #FFCC66;")
+            QApplication.beep()
+
+            if err_text:
+                QMessageBox.warning(
+                    self,
+                    "Озвучивание завершено с ошибками",
+                    f"Озвучено {success_count} из {total_count}.\n\nОшибка от Google:\n{err_text}",
+                )
+            self.btn_cancel.hide()
+            self.btn_close.show()
+            self.btn_close.setFocus()
+            return
+        else:
+            self.progress_bar.setValue(100)
+            self.progress_bar.setFormat(f"100% — Успешно озвучено {success_count} из {total_count}")
+
+            self.lbl_head_curr.setText("✅ Статус:")
+            self.lbl_head_curr.setStyleSheet("font-weight: bold; font-size: 13px; color: #00FF66;")
+            self.lbl_curr_text.setText(f"Озвучивание успешно завершено! Создано {success_count} аудиодорожек.")
+            self.lbl_curr_text.setStyleSheet("font-size: 13px; font-weight: bold; color: #AAFFAA; padding-left: 8px;")
+
+            self.lbl_done_text.setText(f"Все комментарии ({success_count} шт.) успешно озвучены и синхронизированы.")
+            self.lbl_rem_text.setText("Все задачи выполнены. Аудиодорожки готовы к предпросмотру.")
 
         self.btn_cancel.hide()
         self.btn_close.show()

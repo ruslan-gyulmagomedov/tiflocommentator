@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 Модуль для анализа и нарезки видеофайлов без перекодировки с помощью FFmpeg/FFprobe.
+
+Границы частей и вырезаемых фрагментов выравниваются по ключевым кадрам:
+ffmpeg с -c copy не умеет начинать с произвольного кадра, поэтому «идеальное»
+время начала и реальное начало файла раньше расходились, и комментарии
+запаздывали.
 """
 
 import os
@@ -8,6 +13,12 @@ import json
 import subprocess
 from typing import Dict, List, Any, Optional, Tuple, Callable
 from core.app_paths import get_ffmpeg_path, get_ffprobe_path
+
+
+# Кэш ключевых кадров: путь -> (mtime, размер, список времён)
+_KEYFRAME_CACHE: Dict[str, Tuple[float, int, List[float]]] = {}
+# Кэш длительности, посчитанной по пакетам: путь -> (mtime, размер, секунды)
+_DURATION_FALLBACK_CACHE: Dict[str, Tuple[float, int, float]] = {}
 
 
 class VideoAnalysisResult:
@@ -50,6 +61,151 @@ def parse_time_str_to_seconds(time_str: Any) -> float:
         return float(s)
     except Exception:
         return 0.0
+
+
+def get_keyframe_times(video_path: str, custom_ffprobe: str = "") -> List[float]:
+    """
+    Возвращает отсортированный список времён ключевых кадров (в секундах).
+
+    Результат кэшируется по пути, дате изменения и размеру файла: список
+    нужен и при планировании частей, и при вырезании фрагментов, а полный
+    проход по пакетам на длинном видео небыстрый.
+    """
+    if not video_path or not os.path.isfile(video_path):
+        return []
+
+    try:
+        st = os.stat(video_path)
+        key = os.path.abspath(video_path)
+        cached = _KEYFRAME_CACHE.get(key)
+        if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+            return list(cached[2])
+    except Exception:
+        st = None
+
+    ffprobe = get_ffprobe_path(custom_ffprobe)
+    cmd = [
+        ffprobe,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-skip_frame", "nokey",
+        "-show_entries", "frame=pts_time",
+        "-of", "csv=p=0",
+        video_path
+    ]
+
+    times: List[float] = []
+    try:
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo
+        )
+        for line in proc.stdout:
+            s = line.strip().strip(",")
+            if not s:
+                continue
+            try:
+                times.append(float(s.split(",")[0]))
+            except Exception:
+                continue
+        proc.stdout.close()
+        proc.wait(timeout=10)
+    except Exception as e:
+        print(f"Не удалось получить список ключевых кадров {video_path}: {e}")
+        return []
+
+    times = sorted(t for t in times if t >= 0)
+    try:
+        if st is not None:
+            _KEYFRAME_CACHE[os.path.abspath(video_path)] = (st.st_mtime, st.st_size, list(times))
+    except Exception:
+        pass
+    return times
+
+
+def _probe_duration_by_demux(video_path: str, custom_ffprobe: str = "") -> float:
+    """
+    Запасное определение длительности: проходит по пакетам потока и берёт
+    максимальную сумму pts + duration. Нужно для файлов, у которых в
+    заголовке длительность не прописана (некоторые MKV/TS после монтажа).
+    """
+    if not video_path or not os.path.isfile(video_path):
+        return 0.0
+
+    try:
+        st = os.stat(video_path)
+        key = os.path.abspath(video_path)
+        cached = _DURATION_FALLBACK_CACHE.get(key)
+        if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+            return cached[2]
+    except Exception:
+        st = None
+
+    ffprobe = get_ffprobe_path(custom_ffprobe)
+    best = 0.0
+
+    startupinfo = None
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    for stream_sel in ("v:0", "a:0"):
+        try:
+            cmd = [
+                ffprobe,
+                "-v", "error",
+                "-select_streams", stream_sel,
+                "-show_entries", "packet=pts_time,duration_time",
+                "-of", "csv=p=0",
+                video_path
+            ]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                startupinfo=startupinfo
+            )
+            for line in proc.stdout:
+                s = line.strip()
+                if not s:
+                    continue
+                parts = s.split(",")
+                try:
+                    pts = float(parts[0]) if parts[0] not in ("", "N/A") else 0.0
+                except Exception:
+                    continue
+                dur = 0.0
+                if len(parts) > 1 and parts[1] not in ("", "N/A"):
+                    try:
+                        dur = float(parts[1])
+                    except Exception:
+                        dur = 0.0
+                if pts >= 0:
+                    best = max(best, pts + dur)
+            proc.stdout.close()
+            proc.wait(timeout=10)
+        except Exception:
+            continue
+
+    if best > 0 and st is not None:
+        try:
+            _DURATION_FALLBACK_CACHE[os.path.abspath(video_path)] = (st.st_mtime, st.st_size, best)
+        except Exception:
+            pass
+    return round(best, 3)
 
 
 def analyze_media(video_path: str, custom_ffprobe: str = "") -> VideoAnalysisResult:
@@ -144,6 +300,10 @@ def analyze_media(video_path: str, custom_ffprobe: str = "") -> VideoAnalysisRes
                     d_val = parse_time_str_to_seconds(tag_val)
                     if d_val > duration:
                         duration = d_val
+
+        # Заголовок не дал длительность — считаем по пакетам
+        if duration == 0.0:
+            duration = _probe_duration_by_demux(video_path, custom_ffprobe)
 
         return VideoAnalysisResult(
             duration=duration,
@@ -272,6 +432,56 @@ def normalize_video_container(
         return False
 
 
+def plan_chunk_boundaries(
+    src_video_path: str,
+    chunk_duration_sec: float,
+    custom_ffprobe: str = "",
+    total_duration: Optional[float] = None,
+    info: Optional[Dict[str, Any]] = None
+) -> List[float]:
+    """
+    Планирует границы частей: каждая граница — существующий ключевой кадр.
+
+    Возвращает список временных меток от 0.0 до конца видео. Если ключевые
+    кадры получить не удалось, границы ставятся по идеальному шагу.
+    """
+    if total_duration is None:
+        media_info = analyze_media(src_video_path, custom_ffprobe)
+        total_duration = media_info.duration
+    total_duration = float(total_duration or 0.0)
+    if total_duration <= 0:
+        return [0.0]
+
+    keyframes = get_keyframe_times(src_video_path, custom_ffprobe)
+    if info is not None:
+        info["keyframe_aligned"] = bool(keyframes)
+
+    boundaries = [0.0]
+    if keyframes:
+        cur = 0.0
+        while cur + 0.05 < total_duration:
+            target = cur + chunk_duration_sec
+            if target >= total_duration - 0.05:
+                break
+            nxt = None
+            for kf in keyframes:
+                if kf > target + 0.001:
+                    nxt = kf
+                    break
+            if nxt is None or nxt >= total_duration - 0.05:
+                break
+            boundaries.append(round(float(nxt), 3))
+            cur = float(nxt)
+    else:
+        cur = 0.0
+        while cur + chunk_duration_sec < total_duration - 0.05:
+            cur += chunk_duration_sec
+            boundaries.append(round(cur, 3))
+
+    boundaries.append(round(total_duration, 3))
+    return boundaries
+
+
 def split_video_into_chunks(
     src_video_path: str,
     output_dir: str,
@@ -281,7 +491,19 @@ def split_video_into_chunks(
     progress_callback = None
 ) -> List[Dict[str, Any]]:
     """
-    Разрезает видео на части заданной длительности без перекодировки (-c copy).
+    Нарезает видео на части без перекодировки (-c copy), выравнивая границы
+    по ключевым кадрам.
+
+    Почему это важно для синхронизации тифлокомментариев:
+    FFmpeg с -c copy физически не может начать часть с произвольного кадра —
+    он всегда начинает с ближайшего ключевого кадра (GOP может достигать
+    5-10 секунд). Раньше метаданные части указывали на «идеальное» время
+    (например, 15:00), а файл фактически начинался с ключевого кадра раньше
+    (например, 14:55). В результате ВСЕ комментарии этой части на таймлайне
+    запаздывали на эту разницу.
+
+    Теперь границы частей заранее выбираются по ключевым кадрам, поэтому
+    start_time_sec точно совпадает с первым кадром файла части.
     Возвращает список словарей с метаданными о каждой части.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -295,24 +517,31 @@ def split_video_into_chunks(
     if not ext:
         ext = ".mp4"
 
-    chunks = []
-    current_start = 0.0
-    chunk_idx = 1
-    total_chunks = max(1, int((total_duration + chunk_duration_sec - 0.001) // chunk_duration_sec))
+    plan_info: Dict[str, Any] = {}
+    boundaries = plan_chunk_boundaries(
+        src_video_path,
+        chunk_duration_sec,
+        custom_ffprobe=custom_ffprobe,
+        total_duration=total_duration,
+        info=plan_info
+    )
+
+    chunks: List[Dict[str, Any]] = []
+    total_chunks = max(1, len(boundaries) - 1)
 
     startupinfo = None
     if os.name == 'nt':
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-    while current_start < total_duration:
-        current_end = min(current_start + chunk_duration_sec, total_duration)
+    for idx in range(total_chunks):
+        current_start = boundaries[idx]
+        current_end = boundaries[idx + 1]
+        duration_chunk = max(0.1, current_end - current_start)
+        chunk_idx = idx + 1
         part_filename = f"part_{chunk_idx:03d}{ext}"
         part_path = os.path.join(output_dir, part_filename)
-        duration_chunk = current_end - current_start
 
-        # FFmpeg команда нарезки без перекодировки
-        # Помещаем -ss до -i для быстрого позиционирования по ключевым кадрам
         cmd = [
             ffmpeg,
             "-y",
@@ -334,24 +563,118 @@ def split_video_into_chunks(
             check=True
         )
 
-        chunk_data = {
+        chunks.append({
             "index": chunk_idx,
             "filename": part_filename,
             "filepath": part_path,
             "start_time_sec": round(current_start, 3),
             "end_time_sec": round(current_end, 3),
             "duration_sec": round(duration_chunk, 3),
+            "keyframe_aligned": bool(plan_info.get("keyframe_aligned")),
             "processed": False
-        }
-        chunks.append(chunk_data)
+        })
 
         if progress_callback:
             progress_callback(chunk_idx, total_chunks)
 
-        current_start += chunk_duration_sec
-        chunk_idx += 1
-
     return chunks
+
+
+def repair_legacy_chunk_timing(project, custom_ffprobe: str = "") -> bool:
+    """
+    Исправляет метаданные частей, созданных старой версией программы.
+    Старая нарезка указывала «идеальное» начало части, а файл фактически
+    начинался с предыдущего ключевого кадра — из-за этого все комментарии
+    такой части запаздывали. Здесь начало части заменяется на реальный
+    ключевой кадр. Конец части у старых файлов уже совпадал с номинальным.
+
+    Возвращает True, если что-то было исправлено.
+    """
+    try:
+        chunks = project.chunks
+        if not chunks:
+            return False
+        if all(c.get("keyframe_aligned") for c in chunks):
+            return False
+
+        src = project.data.get("src_video_path", "")
+        keyframes = get_keyframe_times(src, custom_ffprobe)
+        if not keyframes:
+            return False
+
+        changed = False
+        for ch in chunks:
+            if ch.get("keyframe_aligned"):
+                continue
+            nominal = float(ch.get("start_time_sec", 0.0) or 0.0)
+            if nominal > 0.001:
+                actual = 0.0
+                for kf in keyframes:
+                    if kf <= nominal + 0.001:
+                        actual = float(kf)
+                        continue
+                    break
+                if 0.0 < actual < nominal - 0.01:
+                    ch["legacy_nominal_start_sec"] = round(nominal, 3)
+                    ch["start_time_sec"] = round(actual, 3)
+                    changed = True
+            ch["keyframe_aligned"] = True
+
+        if changed:
+            project.save()
+        return changed
+    except Exception as e:
+        print(f"Не удалось исправить тайминги старых частей: {e}")
+        return False
+
+
+def align_fragment_to_keyframes(
+    src_video_path: str,
+    start_sec: float,
+    end_sec: float,
+    custom_ffprobe: str = ""
+) -> Tuple[float, float]:
+    """
+    Выравнивает границы фрагмента по ключевым кадрам.
+
+    -c copy начинает фрагмент с ближайшего ключевого кадра раньше запрошенного
+    времени, из-за чего таймкоды модели запаздывали. Начало округляем вниз до
+    ключевого кадра, конец — вверх до следующего ключевого кадра; небольшое
+    расширение выделения допустимо. Возвращает реальные (start, end), по
+    которым и надо смещать таймкоды.
+    """
+    try:
+        start_sec = max(0.0, float(start_sec or 0.0))
+    except Exception:
+        start_sec = 0.0
+    try:
+        end_sec = float(end_sec or 0.0)
+    except Exception:
+        end_sec = start_sec + 0.1
+    if end_sec <= start_sec + 0.1:
+        end_sec = start_sec + 0.1
+
+    keyframes = get_keyframe_times(src_video_path, custom_ffprobe)
+    if not keyframes:
+        return (round(start_sec, 3), round(end_sec, 3))
+
+    aligned_start = 0.0
+    for kf in keyframes:
+        if kf <= start_sec + 0.001:
+            aligned_start = float(kf)
+            continue
+        break
+
+    aligned_end = end_sec
+    for kf in keyframes:
+        if kf >= end_sec - 0.001:
+            aligned_end = float(kf)
+            break
+
+    if aligned_end <= aligned_start + 0.1:
+        aligned_end = max(end_sec, aligned_start + 0.1)
+
+    return (round(aligned_start, 3), round(aligned_end, 3))
 
 
 def extract_frame_screenshot(
@@ -400,10 +723,18 @@ def extract_video_fragment(
     start_sec: float,
     end_sec: float,
     output_path: str,
-    custom_ffmpeg: str = ""
+    custom_ffmpeg: str = "",
+    custom_ffprobe: str = "",
+    align_to_keyframes: bool = False,
+    info: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
     Вырезает заданный фрагмент видео (от start_sec до end_sec) в эталонном для Gemini формате MP4 (H.264/AAC).
+
+    Границы по умолчанию выравниваются по ключевым кадрам, потому что -c copy
+    не умеет начинать с произвольного кадра. Реальные границы возвращаются через
+    словарь info (ключи start_sec, end_sec) — по ним нужно смещать таймкоды
+    комментариев, иначе они запаздывают.
     """
     if not os.path.isfile(src_video_path):
         return False
@@ -411,7 +742,38 @@ def extract_video_fragment(
     ffmpeg = get_ffmpeg_path(custom_ffmpeg)
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
-    dur = max(0.1, round(end_sec - start_sec, 3))
+    try:
+        req_start = max(0.0, float(start_sec or 0.0))
+    except Exception:
+        req_start = 0.0
+    try:
+        req_end = float(end_sec or 0.0)
+    except Exception:
+        req_end = req_start + 0.1
+
+    if req_end <= req_start + 0.1:
+        req_end = req_start + 0.1
+
+    if align_to_keyframes:
+        actual_start, actual_end = align_fragment_to_keyframes(
+            src_video_path, req_start, req_end, custom_ffprobe
+        )
+    else:
+        actual_start, actual_end = round(req_start, 3), round(req_end, 3)
+
+    if info is not None:
+        info["requested_start_sec"] = round(req_start, 3)
+        info["requested_end_sec"] = round(req_end, 3)
+        info["start_sec"] = round(actual_start, 3)
+        info["end_sec"] = round(actual_end, 3)
+        info["keyframe_aligned"] = bool(
+            align_to_keyframes and actual_start != round(req_start, 3)
+        )
+
+    # Сдвиг на 2 мс от самого ключевого кадра: так ffmpeg не промахивается
+    # на кадр назад при позиционировании ровно по ключевому кадру.
+    seek_start = max(0.0, actual_start + (0.002 if actual_start > 0 else 0.0))
+    dur = max(0.1, round(actual_end - actual_start, 3))
 
     startupinfo = None
     if os.name == 'nt':
@@ -423,7 +785,7 @@ def extract_video_fragment(
         ffmpeg,
         "-y",
         "-nostdin",
-        "-ss", str(round(max(0.0, start_sec), 3)),
+        "-ss", str(round(seek_start, 3)),
         "-i", src_video_path,
         "-t", str(round(dur, 3)),
         "-c", "copy",
@@ -450,8 +812,8 @@ def extract_video_fragment(
         ffmpeg,
         "-y",
         "-nostdin",
-        "-ss", str(round(max(0.0, start_sec), 3)),
         "-i", src_video_path,
+        "-ss", str(round(seek_start, 3)),
         "-t", str(round(dur, 3)),
         "-c:v", "libx264",
         "-preset", "ultrafast",
@@ -475,5 +837,3 @@ def extract_video_fragment(
     except Exception as e:
         print(f"Ошибка вырезания фрагмента видео: {e}")
         return False
-
-

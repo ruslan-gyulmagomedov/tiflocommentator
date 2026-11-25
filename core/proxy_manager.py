@@ -5,6 +5,7 @@
 из реестра WinINet и применение их к сетевым библиотекам Python.
 """
 
+import logging
 import os
 import sys
 import urllib.request
@@ -33,6 +34,7 @@ def get_windows_system_proxy_info() -> Dict[str, Optional[str]]:
             info["server"] = info["https"] or info["http"]
         return info
 
+    logging.info('Прокси: чтение реестра Windows')
     try:
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
@@ -60,7 +62,9 @@ def get_windows_system_proxy_info() -> Dict[str, Optional[str]]:
         print(f"Предупреждение при чтении настроек прокси из реестра Windows: {e}")
 
     try:
+        logging.info('Прокси: urllib getproxies_registry')
         reg_proxies = urllib.request.getproxies_registry()
+        logging.info('Прокси: urllib getproxies_registry готово')
         if reg_proxies:
             info["http"] = reg_proxies.get("http")
             info["https"] = reg_proxies.get("https")
@@ -134,15 +138,20 @@ def apply_proxy_settings(mode: str = "system", custom_proxy: str = "") -> Dict[s
 
     Возвращает словарь с фактически примененными прокси.
     """
+    logging.info('Прокси: старт apply_proxy_settings, режим %s', mode)
     clear_proxy_env()
+    logging.info('Прокси: переменные очищены')
 
     # Привязываем httplib2 к модулю socks (PySocks)
     try:
         import socks
+        logging.info('Прокси: socks импортирован')
         import httplib2
+        logging.info('Прокси: httplib2 импортирован')
         httplib2.socks = socks
     except Exception:
         pass
+    logging.info('Прокси: модули подготовлены')
 
     applied = {"http": None, "https": None, "mode": mode}
 
@@ -166,6 +175,7 @@ def apply_proxy_settings(mode: str = "system", custom_proxy: str = "") -> Dict[s
 
     # mode == "system" (по умолчанию)
     info = get_windows_system_proxy_info()
+    logging.info('Прокси: системные настройки получены: %s', info)
     if info.get("enabled"):
         http_url = info.get("http") or format_proxy_url(info.get("server") or "")
         https_url = info.get("https") or http_url

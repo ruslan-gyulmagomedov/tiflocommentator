@@ -103,20 +103,24 @@ class VideoPreparationWorker(QThread):
                     "curr_text": f"Оптимизация медиафайла {os.path.basename(cur_video)} в эталонный MP4 (H.264/AAC/FastStart)...",
                     "rem_text": "Открытие проекта в плеере",
                     "speed_str": "—",
-                    "time_str": "00:00"
+                    "time_str": "00:00",
+                    "total_sec": float(proj.data.get("total_duration_sec", 0.0) or 0.0),
+                    "unknown_total": float(proj.data.get("total_duration_sec", 0.0) or 0.0) <= 0.0,
                 })
 
                 def on_norm_progress(pct: float, speed: str, rem_time: str):
                     if self.cancel_event.is_set() or self._is_cancelled:
                         return
                     self.progress_updated.emit({
-                        "percent": int(20 + pct * 0.75),
+                        "percent": min(95, max(20, int(round(20 + pct * 75.0)))),
                         "step_name": "Нормализация видеопотока проекта",
                         "done_text": "Загрузка данных проекта",
-                        "curr_text": f"Конвертация видеоряда в формат H.264/AAC...\nСкорость: {speed}, осталось: {rem_time}",
+                        "curr_text": "Конвертация видеоряда в формат H.264/AAC...",
                         "rem_text": "Открытие проекта в плеере",
-                        "speed_str": speed,
-                        "time_str": rem_time
+                        "speed_str": rem_time,
+                        "time_str": speed,
+                        "total_sec": float(proj.data.get("total_duration_sec", 0.0) or 0.0),
+                        "unknown_total": float(proj.data.get("total_duration_sec", 0.0) or 0.0) <= 0.0,
                     })
 
                 norm_ok = normalize_video_container(
@@ -180,15 +184,17 @@ class VideoPreparationWorker(QThread):
         def on_norm_progress(pct: float, speed: str, rem_time: str):
             if self.cancel_event.is_set() or self._is_cancelled:
                 return
-            scaled_pct = int(5 + (pct * 0.85))
+            scaled_pct = int(round(5 + pct * 85.0))
             self.progress_updated.emit({
                 "percent": min(92, max(5, scaled_pct)),
                 "step_name": "Нормализация видео и звука для Gemini",
                 "done_text": f"1. Анализ медиафайла ({codec_name}, {format_duration_sec(total_dur)})",
-                "curr_text": f"{mode_str}\nСкорость: {speed}, осталось: {rem_time}",
+                "curr_text": mode_str,
                 "rem_text": "3. Сохранение метаданных и открытие проекта",
-                "speed_str": speed,
-                "time_str": rem_time
+                "speed_str": rem_time,
+                "time_str": speed,
+                "total_sec": float(total_dur or 0.0),
+                "unknown_total": float(total_dur or 0.0) <= 0.0,
             })
 
         norm_ok = normalize_video_container(
@@ -220,7 +226,9 @@ class VideoPreparationWorker(QThread):
             "curr_text": f"Формирование проекта «{self.project_name}»...",
             "rem_text": "Готово к работе",
             "speed_str": "—",
-            "time_str": "00:00"
+            "time_str": "00:00",
+            "total_sec": float(total_dur or 0.0),
+            "unknown_total": False
         })
 
         proj = Project(self.project_name, folder_path)
@@ -268,6 +276,7 @@ class VideoPreparationProgressDialog(QDialog):
         self.result_project: Optional[Project] = None
         self.is_completed = False
         self.is_cancelled = False
+        self.total_duration_sec = 0.0
 
         self.setWindowTitle("Подготовка и оптимизация видео — Тифлокомментатор")
         self.setAccessibleName("Окно оптимизации и подготовки видеофайла для анализа в Google Gemini")
@@ -379,9 +388,9 @@ class VideoPreparationProgressDialog(QDialog):
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(10)
 
-        self.lbl_stats = QLabel("Скорость: — | Осталось времени: —", self)
+        self.lbl_stats = QLabel("Уже выполнено: 00:00 | Скорость: — | Осталось: —", self)
         self.lbl_stats.setStyleSheet("font-size: 12px; color: #AAAAAA; font-weight: bold;")
-        self.lbl_stats.setAccessibleName("Скорость обработки и расчетное оставшееся время")
+        self.lbl_stats.setAccessibleName("Уже выполнено, скорость обработки и расчетное оставшееся время")
         bottom_layout.addWidget(self.lbl_stats)
 
         bottom_layout.addStretch(1)
@@ -414,7 +423,15 @@ class VideoPreparationProgressDialog(QDialog):
     @Slot(dict)
     def on_progress_updated(self, data: dict):
         pct = data.get("percent", 0)
-        self.progress_bar.setValue(pct)
+
+        if data.get("unknown_total"):
+            # Длительность ещё неизвестна — неопределённая полоса прогресса
+            if self.progress_bar.maximum() != 0:
+                self.progress_bar.setRange(0, 0)
+        else:
+            if self.progress_bar.maximum() == 0:
+                self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(pct)
 
         done_text = data.get("done_text", "")
         if done_text:
@@ -429,8 +446,53 @@ class VideoPreparationProgressDialog(QDialog):
             self.lbl_rem_text.setText(rem_text)
 
         speed_str = data.get("speed_str", "—")
-        time_str = data.get("time_str", "—")
-        self.lbl_stats.setText(f"Скорость: {speed_str} | Осталось времени: {time_str}")
+        time_str = data.get("time_str", "00:00")
+        if data.get("total_sec"):
+            self.total_duration_sec = float(data.get("total_sec") or 0.0)
+        self.update_stats(speed_str, time_str)
+
+    @staticmethod
+    def _parse_hms(value) -> Optional[float]:
+        """Разбирает строку HH:MM:SS(.mmm) или MM:SS в секунды."""
+        try:
+            parts = [float(p) for p in str(value).strip().split(':')]
+        except Exception:
+            return None
+        if len(parts) == 3:
+            return parts[0] * 3600.0 + parts[1] * 60.0 + parts[2]
+        if len(parts) == 2:
+            return parts[0] * 60.0 + parts[1]
+        if len(parts) == 1:
+            return parts[0]
+        return None
+
+    def update_stats(self, speed_str: str, elapsed_str: str):
+        """
+        Формирует понятную строку статистики:
+        «Уже выполнено» — время от начала видео, «Скорость» — коэффициент FFmpeg (x),
+        «Осталось» — расчетное оставшееся время.
+        """
+        from core.audio_dsp import format_duration_sec
+
+        elapsed_str = elapsed_str or "00:00"
+        cur_sec = self._parse_hms(elapsed_str) or 0.0
+
+        factor = None
+        try:
+            factor = float(str(speed_str).strip().lower().rstrip('x'))
+        except Exception:
+            factor = None
+
+        parts = [f"Уже выполнено: {elapsed_str}"]
+        if speed_str and str(speed_str) not in ('—', 'N/A', 'None'):
+            parts.append(f"Скорость: {speed_str}")
+        if factor and factor > 0.0 and self.total_duration_sec > 0.0:
+            remaining = max(0.0, self.total_duration_sec - cur_sec) / factor
+            parts.append(f"Осталось: {format_duration_sec(remaining)}")
+        elif self.total_duration_sec > 0.0 and cur_sec <= 0.0:
+            parts.append('Осталось: —')
+
+        self.lbl_stats.setText(" | ".join(parts))
 
     @Slot(object)
     def on_preparation_finished(self, project: Project):

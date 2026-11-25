@@ -22,7 +22,7 @@ from PySide6.QtGui import QFont, QKeySequence, QShortcut
 
 from core.gemini_client import GeminiClient
 from core.character_manager import CharacterManager
-from core.video_splitter import split_video_into_chunks
+from core.video_splitter import split_video_into_chunks, repair_legacy_chunk_timing
 
 
 class GeminiGenerationWorker(QThread):
@@ -33,18 +33,67 @@ class GeminiGenerationWorker(QThread):
     generation_finished = Signal()
     generation_error = Signal(str)
     generation_cancelled = Signal()
+    chunk_failed = Signal(int, str)
 
-    def __init__(self, project, config, parent=None):
+    def __init__(self, project, config, chunk_indices=None, parent=None):
         super().__init__(parent)
         self.project = project
         self.config = config
+        # Номера частей для повторной генерации. Пусто — обрабатываются
+        # все ещё не готовые части (обычный запуск и продолжение).
+        self.chunk_indices = set(int(i) for i in chunk_indices) if chunk_indices else None
         self.cancel_event = threading.Event()
         self._is_cancelled = False
+        self._decision_event = threading.Event()
+        self._retry_allowed = False
 
     def cancel(self):
         """Отменяет генерацию тифлокомментариев."""
         self._is_cancelled = True
         self.cancel_event.set()
+        self._decision_event.set()
+
+    def set_retry_decision(self, retry: bool):
+        """Вызывается из GUI после вопроса «повторить или отменить»."""
+        self._retry_allowed = bool(retry)
+        self._decision_event.set()
+
+    def _wait_for_retry_decision(self) -> bool:
+        while not self._decision_event.wait(0.2):
+            if self.cancel_event.is_set() or self._is_cancelled:
+                return False
+        return (self._retry_allowed
+                and not self.cancel_event.is_set()
+                and not self._is_cancelled)
+
+    def _delete_chunk_commentaries(self, chunk_idx: int):
+        """Удаляет старые комментарии только указанной части вместе с их аудиофайлами."""
+        if chunk_idx < 1 or chunk_idx > len(self.project.chunks):
+            return
+        chunk = self.project.chunks[chunk_idx - 1]
+        start_sec = float(chunk.get("start_time_sec", 0.0) or 0.0)
+        end_sec = float(chunk.get("end_time_sec", 0.0) or 0.0)
+        kept = []
+        for c in self.project.data.get("commentaries", []):
+            c_idx = c.get("chunk_index")
+            if c_idx is not None:
+                belongs = int(c_idx) == chunk_idx
+            else:
+                st = float(c.get("start_time", 0.0) or 0.0)
+                belongs = start_sec <= st < max(start_sec + 0.1, end_sec)
+            if belongs:
+                for key in ("audio_file", "raw_audio_file"):
+                    audio_path = c.get(key)
+                    if audio_path and os.path.isfile(audio_path):
+                        try:
+                            os.remove(audio_path)
+                        except Exception:
+                            pass
+            else:
+                kept.append(c)
+        self.project.data["commentaries"] = kept
+        chunk["processed"] = False
+        self.project.save()
 
     def run(self):
         try:
@@ -90,15 +139,37 @@ class GeminiGenerationWorker(QThread):
                 self.project.data["chunks"] = chunks
                 self.project.save()
 
+            # Исправляем тайминги частей старых проектов (границы по ключевым кадрам)
+            repair_legacy_chunk_timing(self.project, self.config.ffprobe_path)
+
             total_chunks = len(self.project.chunks)
 
-            for chunk_idx, chunk in enumerate(self.project.chunks, start=1):
+            # Для повторной генерации удаляем старые комментарии выбранных частей
+            if self.chunk_indices is not None:
+                for idx in sorted(self.chunk_indices):
+                    if 1 <= idx <= total_chunks:
+                        self._delete_chunk_commentaries(idx)
+
+            selected = []
+            for idx, chunk in enumerate(self.project.chunks, start=1):
+                if self.chunk_indices is not None:
+                    if idx not in self.chunk_indices:
+                        continue
+                    selected.append((idx, chunk))
+                    continue
+                if chunk.get("processed"):
+                    continue
+                selected.append((idx, chunk))
+
+            total_selected = len(selected)
+            if total_selected == 0:
+                self.generation_finished.emit()
+                return
+
+            for pos, (chunk_idx, chunk) in enumerate(selected, start=1):
                 if self.cancel_event.is_set() or self._is_cancelled:
                     self.generation_cancelled.emit()
                     return
-
-                if chunk.get("processed"):
-                    continue
 
                 # Формируем сводку уже сделанного
                 done_chunks_count = sum(1 for c in self.project.chunks if c.get("processed"))
@@ -113,7 +184,7 @@ class GeminiGenerationWorker(QThread):
 
                 # Настраиваемая пауза перед обращением к Gemini API для соблюдения лимитов
                 pause_total = self.config.api_request_pause_sec
-                if chunk_idx > 1 and pause_total > 0:
+                if pos > 1 and pause_total > 0:
                     for rem in range(pause_total, 0, -1):
                         if self.cancel_event.is_set() or self._is_cancelled:
                             self.generation_cancelled.emit()
@@ -123,12 +194,12 @@ class GeminiGenerationWorker(QThread):
                             "phase": "pause",
                             "current_chunk": chunk_idx,
                             "total_chunks": total_chunks,
-                            "percent": int(((chunk_idx - 1) / total_chunks) * 100),
+                            "percent": int(((pos - 1) / total_selected) * 100),
                             "pause_rem": rem,
                             "message": f"Пауза соблюдения лимитов API: осталось {rem} сек. перед частью {chunk_idx}/{total_chunks}...",
                             "done_text": done_summary,
                             "curr_text": f"Соблюдение лимитов Gemini API: пауза {rem} сек. перед частью {chunk_idx}/{total_chunks}",
-                            "rem_text": f"Осталось обработать: {total_chunks - chunk_idx + 1} частей"
+                            "rem_text": f"Осталось обработать: {total_selected - pos + 1} частей"
                         })
 
                         # Спим короткими интервалами по 100 мс для мгновенного отклика кнопки Отмена
@@ -155,70 +226,93 @@ class GeminiGenerationWorker(QThread):
                         "phase": "analyzing",
                         "current_chunk": chunk_idx,
                         "total_chunks": total_chunks,
-                        "percent": int(((chunk_idx - 0.5) / total_chunks) * 100),
+                        "percent": int(((pos - 0.5) / total_selected) * 100),
                         "message": f"Часть {chunk_idx}/{total_chunks}: {msg}",
                         "done_text": done_summary,
                         "curr_text": f"Часть {chunk_idx} из {total_chunks} ({chunk_name}):\n{msg}",
-                        "rem_text": f"Осталось обработать: {total_chunks - chunk_idx} частей"
+                        "rem_text": f"Осталось обработать: {total_selected - pos} частей"
                     })
 
-                gen_cb("Загрузка видеофайла в Google Gemini...")
+                # Повтор текущей части при сбое, чтобы не терять готовые результаты
+                while True:
+                    try:
+                        if self.cancel_event.is_set() or self._is_cancelled:
+                            self.generation_cancelled.emit()
+                            return
 
-                res_data = client.generate_commentary_for_chunk(
-                    chunk_file_path=chunk_file,
-                    chunk_index=chunk_idx,
-                    total_chunks=total_chunks,
-                    start_abs_sec=start_abs,
-                    end_abs_sec=end_abs,
-                    existing_characters=self.project.characters,
-                    previous_commentaries=self.project.commentaries,
-                    user_prompt=self.project.user_prompt,
-                    model_name=self.config.gemini_model,
-                    progress_callback=gen_cb
-                )
+                        gen_cb("Загрузка видеофайла в Google Gemini...")
 
-                if self.cancel_event.is_set() or self._is_cancelled:
-                    self.generation_cancelled.emit()
-                    return
+                        res_data = client.generate_commentary_for_chunk(
+                            chunk_file_path=chunk_file,
+                            chunk_index=chunk_idx,
+                            total_chunks=total_chunks,
+                            start_abs_sec=start_abs,
+                            end_abs_sec=end_abs,
+                            existing_characters=self.project.characters,
+                            previous_commentaries=self.project.commentaries,
+                            user_prompt=self.project.user_prompt,
+                            model_name=self.config.gemini_model,
+                            progress_callback=gen_cb
+                        )
 
-                diag = res_data.get("diagnostics", {})
-                if diag.get("video_status") == "missing":
-                    self.generation_error.emit(f"Ошибка в части {chunk_idx}: Видеоряд недоступен. Комментирование остановлено.")
-                    return
+                        if self.cancel_event.is_set() or self._is_cancelled:
+                            self.generation_cancelled.emit()
+                            return
 
-                from core.gemini_client import parse_time_to_seconds
+                        diag = res_data.get("diagnostics", {})
+                        if diag.get("video_status") == "missing":
+                            raise RuntimeError(
+                                "Видеоряд недоступен для модели Gemini. "
+                                "Проверьте файл части и повторите попытку."
+                            )
 
-                chars = res_data.get("characters", [])
-                comms = res_data.get("commentaries", [])
-                chunk_duration = max(0.1, end_abs - start_abs)
+                        from core.gemini_client import parse_time_to_seconds
 
-                for char_item in chars:
-                    raw_fts = char_item.get("frame_timestamp", char_item.get("frame_timestamp_sec", char_item.get("best_frame_timestamp", 0.0)))
-                    char_item["frame_timestamp_sec"] = parse_time_to_seconds(raw_fts, max_duration=chunk_duration)
+                        chars = res_data.get("characters", [])
+                        comms = res_data.get("commentaries", [])
+                        chunk_duration = max(0.1, end_abs - start_abs)
 
-                if chars:
-                    char_mgr.process_detected_characters(chars, chunk_file, start_abs)
+                        for char_item in chars:
+                            raw_fts = char_item.get("frame_timestamp", char_item.get("frame_timestamp_sec", char_item.get("best_frame_timestamp", 0.0)))
+                            char_item["frame_timestamp_sec"] = parse_time_to_seconds(raw_fts, max_duration=chunk_duration)
 
-                for c in comms:
-                    raw_start = c.get("start_time", c.get("start_time_sec", 0.0))
-                    raw_end = c.get("end_time", c.get("end_time_sec", 0.0))
+                        if chars:
+                            char_mgr.process_detected_characters(chars, chunk_file, start_abs)
 
-                    rel_start = parse_time_to_seconds(raw_start, max_duration=chunk_duration)
-                    rel_end = parse_time_to_seconds(raw_end, max_duration=chunk_duration)
-                    if rel_end <= rel_start:
-                        rel_end = rel_start + 2.0
+                        for c in comms:
+                            raw_start = c.get("start_time", c.get("start_time_sec", 0.0))
+                            raw_end = c.get("end_time", c.get("end_time_sec", 0.0))
 
-                    c["start_time"] = round(start_abs + rel_start, 3)
-                    c["end_time"] = round(start_abs + rel_end, 3)
-                    c["duration_sec"] = round(c["end_time"] - c["start_time"], 3)
-                    c["chunk_index"] = chunk_idx
+                            rel_start = parse_time_to_seconds(raw_start, max_duration=chunk_duration)
+                            rel_end = parse_time_to_seconds(raw_end, max_duration=chunk_duration)
+                            if rel_end <= rel_start:
+                                rel_end = rel_start + 2.0
 
-                self.project.add_commentaries(comms)
-                chunk["processed"] = True
-                self.project.data["current_chunk_index"] = chunk_idx
-                self.project.save()
+                            c["start_time"] = round(start_abs + rel_start, 3)
+                            c["end_time"] = round(start_abs + rel_end, 3)
+                            c["duration_sec"] = round(c["end_time"] - c["start_time"], 3)
+                            c["chunk_index"] = chunk_idx
 
-                self.chunk_finished.emit(chunk_idx, res_data)
+                        self.project.add_commentaries(comms)
+                        chunk["processed"] = True
+                        self.project.data["current_chunk_index"] = chunk_idx
+                        self.project.data["status"] = "in_progress"
+                        self.project.save()
+
+                        self.chunk_finished.emit(chunk_idx, res_data)
+                        break
+                    except Exception as e:
+                        if self.cancel_event.is_set() or self._is_cancelled:
+                            self.generation_cancelled.emit()
+                            return
+                        err_text = str(e) or e.__class__.__name__
+                        print(f"Сбой при обработке части {chunk_idx}: {err_text}")
+                        self._retry_allowed = False
+                        self._decision_event.clear()
+                        self.chunk_failed.emit(chunk_idx, err_text)
+                        if not self._wait_for_retry_decision():
+                            self.generation_cancelled.emit()
+                            return
 
             self.project.data["status"] = "ready_for_review"
             self.project.save()
@@ -237,10 +331,12 @@ class GeminiGenerationProgressDialog(QDialog):
     Высококонтрастное доступное диалоговое окно прогресса создания тифлокомментариев Gemini.
     """
 
-    def __init__(self, project, config, parent=None):
+    def __init__(self, project, config, chunk_indices=None, parent=None):
         super().__init__(parent)
         self.project = project
         self.config = config
+        # Номера частей, выбранных для повторной генерации (None — все неготовые)
+        self.chunk_indices = list(chunk_indices) if chunk_indices else None
         self.start_time = time.time()
         self.is_completed = False
         self.is_cancelled = False
@@ -437,10 +533,12 @@ class GeminiGenerationProgressDialog(QDialog):
         self.worker = GeminiGenerationWorker(
             project=self.project,
             config=self.config,
+            chunk_indices=self.chunk_indices,
             parent=self
         )
         self.worker.progress_updated.connect(self.on_progress_updated)
         self.worker.chunk_finished.connect(self.on_chunk_finished)
+        self.worker.chunk_failed.connect(self.on_chunk_failed)
         self.worker.generation_finished.connect(self.on_generation_finished)
         self.worker.generation_error.connect(self.on_generation_error)
         self.worker.generation_cancelled.connect(self.on_generation_cancelled)
@@ -491,6 +589,38 @@ class GeminiGenerationProgressDialog(QDialog):
             f"Создано тифлокомментариев: {comms_count} шт.\n"
             f"Зафиксировано персонажей: {chars_count} героев"
         )
+
+    @Slot(int, str)
+    def on_chunk_failed(self, chunk_idx: int, err_msg: str):
+        """Предлагает повторить попытку с текущей части или отменить генерацию."""
+        self.lbl_head_curr.setText("⚠️ Сбой при обработке части:")
+        self.lbl_head_curr.setStyleSheet("font-weight: bold; font-size: 13px; color: #FFAA00;")
+        self.lbl_curr_text.setText(
+            f"Часть {chunk_idx}: {err_msg}\n\n"
+            f"Уже готовые части сохранены. Можно повторить попытку с этой же части."
+        )
+        self.lbl_curr_text.setStyleSheet("font-size: 13px; font-weight: bold; color: #FFCC66; padding-left: 8px;")
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Сбой при создании тифлокомментариев")
+        box.setText(f"Не удалось обработать часть {chunk_idx}.\n{err_msg}")
+        box.setInformativeText(
+            "Повторить попытку с текущей части?\n"
+            "Все уже созданные комментарии сохранены.\n"
+            "При отмене позже можно продолжить с этого же места."
+        )
+        retry_btn = box.addButton("Повторить попытку", QMessageBox.AcceptRole)
+        cancel_btn = box.addButton("Отменить генерацию", QMessageBox.RejectRole)
+        retry_btn.setAccessibleName("Повторить попытку с текущей части")
+        cancel_btn.setAccessibleName("Отменить генерацию тифлокомментариев")
+        box.setDefaultButton(retry_btn)
+        box.exec()
+        retry = box.clickedButton() is retry_btn
+
+        self.lbl_head_curr.setText("⚙️ Текущий процесс:")
+        self.lbl_head_curr.setStyleSheet("font-weight: bold; font-size: 13px; color: #FFD700;")
+        self.worker.set_retry_decision(retry)
 
     @Slot()
     def on_generation_finished(self):

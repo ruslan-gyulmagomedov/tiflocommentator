@@ -10,6 +10,7 @@
 """
 
 import os
+import time
 from typing import Dict, List, Any, Optional
 
 from PySide6.QtWidgets import (
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QSizePolicy, QStyle, QFrame, QSlider
 )
 from PySide6.QtGui import QPixmap, QKeySequence, QShortcut, QKeyEvent, QAccessible, QAccessibleEvent
-from PySide6.QtCore import Qt, QUrl, Slot
+from PySide6.QtCore import Qt, QUrl, QTimer, Slot
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -173,6 +174,40 @@ class CharacterCardsDialog(QDialog):
         self.current_images: List[str] = []
         self.current_img_idx: int = 0
         self.is_updating_ui: bool = False
+
+        self._closing = False
+        self._player_shutdown_done = False
+
+        self._player_busy = False
+        self._pending_seek_ms = None
+        self._seek_from_ms = 0
+        self._seek_target_ms = None
+        self._seek_guard_until = 0.0
+        self._pending_pos_ms = None
+        self._pending_transport = None
+        self._pending_volume = None
+        self._last_pos_ms = 0
+        self._dur_ms = 0
+
+        self._seek_timer = QTimer(self)
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.setInterval(120)
+        self._seek_timer.timeout.connect(self._apply_pending_seek)
+
+        self._pos_ui_timer = QTimer(self)
+        self._pos_ui_timer.setSingleShot(True)
+        self._pos_ui_timer.setInterval(0)
+        self._pos_ui_timer.timeout.connect(self._flush_position_ui)
+
+        self._transport_timer = QTimer(self)
+        self._transport_timer.setSingleShot(True)
+        self._transport_timer.setInterval(0)
+        self._transport_timer.timeout.connect(self._apply_pending_transport)
+
+        self._volume_timer = QTimer(self)
+        self._volume_timer.setSingleShot(True)
+        self._volume_timer.setInterval(100)
+        self._volume_timer.timeout.connect(self._apply_pending_volume)
 
         self.init_ui()
         self.init_player()
@@ -509,7 +544,7 @@ class CharacterCardsDialog(QDialog):
         video_path = self.project.video_path
         if video_path and os.path.isfile(video_path):
             self.player.setSource(QUrl.fromLocalFile(video_path))
-            self.player.pause()
+            self._queue_transport('pause')
             self.lbl_status.setText(f"Видеофайл успешно загружен: {os.path.basename(video_path)}")
         else:
             self.lbl_status.setText("Видеофайл проекта не найден. Ручное добавление и загрузка фото из файлов доступны.")
@@ -518,9 +553,11 @@ class CharacterCardsDialog(QDialog):
 
     def on_player_media_status_changed(self, status):
         """Переводит плеер в паузу при загрузке медиа для отображения первого кадра."""
+        if self._closing:
+            return
         if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
             if self.player.playbackState() == QMediaPlayer.StoppedState:
-                self.player.pause()
+                self._queue_transport('pause')
 
     def setup_shortcuts(self):
         """Настраивает доступные горячие клавиши для всех операций."""
@@ -815,7 +852,7 @@ class CharacterCardsDialog(QDialog):
         if not char:
             return
 
-        pos_ms = self.player.position()
+        pos_ms = self._last_pos_ms
         pos_sec = pos_ms / 1000.0
         timecode = format_seconds_to_timecode(pos_sec)
 
@@ -837,50 +874,157 @@ class CharacterCardsDialog(QDialog):
             )
             self.lbl_status.setText("Ошибка захвата кадра.")
 
-    def toggle_play(self):
-        """Запуск / пауза видеоплеера."""
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
-            self.player.pause()
-            self.btn_play.setText("▶ Воспроизведение (Пробел)")
-            self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-        else:
-            self.player.play()
-            self.btn_play.setText("⏸ Пауза (Пробел)")
-            self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+    def _queue_transport(self, action: str):
+        """Запоминает пуск или паузу и выполняет их вне обработчика кнопки."""
+        if self._closing:
+            return
+        self._pending_transport = action
+        self._transport_timer.start()
 
-    def seek_relative(self, delta_ms: int):
-        """Относительное перемещение по видео."""
-        if self.player.playbackState() == QMediaPlayer.StoppedState:
-            self.player.pause()
-        new_pos = max(0, min(self.player.position() + delta_ms, self.player.duration()))
-        self.player.setPosition(new_pos)
-
-    def on_slider_moved(self, value: int):
-        """Перемещение ползунка таймлайна пользователем."""
-        dur = self.player.duration()
-        if dur > 0:
-            if self.player.playbackState() == QMediaPlayer.StoppedState:
+    def _apply_pending_transport(self):
+        """Выполняет отложенный пуск или паузу."""
+        action = self._pending_transport
+        self._pending_transport = None
+        if self._closing or action is None or self._player_busy:
+            return
+        self._player_busy = True
+        try:
+            if action == 'play':
+                self.player.play()
+            elif action == 'pause':
                 self.player.pause()
-            target_pos = int((value / 1000.0) * dur)
-            self.player.setPosition(target_pos)
+        except Exception:
+            pass
+        finally:
+            self._player_busy = False
 
-
-    def on_player_pos_changed(self, pos_ms: int):
-        """Обновление позиции таймлайна и индикатора времени."""
-        dur_ms = self.player.duration()
-        if dur_ms > 0:
-            pct = int((pos_ms / dur_ms) * 1000)
+    def _request_seek(self, target_ms: int):
+        """Запоминает точку перехода и применяет её, когда ползунок отпущен."""
+        if self._closing:
+            return
+        target = max(0, int(target_ms))
+        self._seek_from_ms = self._last_pos_ms
+        self._pending_seek_ms = target
+        self._seek_target_ms = target
+        self._seek_guard_until = time.monotonic() + 2.0
+        self._last_pos_ms = target
+        if self._dur_ms > 0:
+            pct = int(target / self._dur_ms * 1000)
             self.slider_pos.blockSignals(True)
             self.slider_pos.setValue(pct)
             self.slider_pos.blockSignals(False)
+        pos_str = format_seconds_to_timecode(target / 1000.0)
+        dur_str = format_seconds_to_timecode(self._dur_ms / 1000.0)
+        self.lbl_time.setText(f"{pos_str} / {dur_str}")
+        self._seek_timer.start()
 
+    def _apply_pending_seek(self):
+        """Выполняет отложенный переход по фильму."""
+        if self._closing or self._pending_seek_ms is None:
+            return
+        if self._player_busy:
+            self._seek_timer.start()
+            return
+        target = self._pending_seek_ms
+        self._pending_seek_ms = None
+        self._player_busy = True
+        try:
+            if self.player.playbackState() == QMediaPlayer.StoppedState:
+                self.player.pause()
+            self.player.setPosition(target)
+        except Exception:
+            pass
+        finally:
+            self._player_busy = False
+        self._seek_guard_until = time.monotonic() + 1.5
+
+    def _is_stale_position(self, pos_ms: int) -> bool:
+        """Отличает запоздавшие сообщения о старой позиции от нового места."""
+        target = self._seek_target_ms
+        if target is None:
+            return False
+        if abs(pos_ms - target) <= 400:
+            self._seek_target_ms = None
+            return False
+        if time.monotonic() >= self._seek_guard_until:
+            self._seek_target_ms = None
+            return False
+        return abs(pos_ms - self._seek_from_ms) <= 400
+
+    def _apply_pending_volume(self):
+        """Применяет отложенную громкость звука."""
+        volume = self._pending_volume
+        self._pending_volume = None
+        audio_output = getattr(self, 'audio_output', None)
+        if self._closing or volume is None or audio_output is None:
+            return
+        try:
+            audio_output.setVolume(volume)
+        except Exception:
+            pass
+
+    def _flush_position_ui(self):
+        """Обновляет таймлайн и время вне сигнала плеера, не мешая перетаскиванию."""
+        if self._closing or self._pending_pos_ms is None:
+            return
+        pos_ms = self._pending_pos_ms
+        self._pending_pos_ms = None
+        if self._is_stale_position(pos_ms):
+            return
+        self._last_pos_ms = max(0, int(pos_ms))
+        dur_ms = self._dur_ms
+        if dur_ms > 0 and not self.slider_pos.isSliderDown():
+            pct = int(pos_ms / dur_ms * 1000)
+            self.slider_pos.blockSignals(True)
+            self.slider_pos.setValue(pct)
+            self.slider_pos.blockSignals(False)
         pos_str = format_seconds_to_timecode(pos_ms / 1000.0)
         dur_str = format_seconds_to_timecode(dur_ms / 1000.0)
         self.lbl_time.setText(f"{pos_str} / {dur_str}")
 
+    def toggle_play(self):
+        """Запуск / пауза видеоплеера."""
+        if self._closing:
+            return
+        if self.player.playbackState() == QMediaPlayer.PlayingState:
+            self._queue_transport('pause')
+            self.btn_play.setText("▶ Воспроизведение (Пробел)")
+            self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+            return
+        self._queue_transport('play')
+        self.btn_play.setText("⏸ Пауза (Пробел)")
+        self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+
+    def seek_relative(self, delta_ms: int):
+        """Относительное перемещение по видео."""
+        if self._closing:
+            return
+        base = self._last_pos_ms
+        limit = self._dur_ms if self._dur_ms > 0 else base + abs(delta_ms)
+        self._request_seek(max(0, min(base + delta_ms, limit)))
+
+    def on_slider_moved(self, value: int):
+        """Перемещение ползунка таймлайна пользователем."""
+        if self._closing:
+            return
+        dur = self._dur_ms
+        if dur <= 0:
+            return
+        target_pos = int(value / 1000.0 * dur)
+        self._request_seek(target_pos)
+
+    def on_player_pos_changed(self, pos_ms: int):
+        """Запоминает позицию и планирует обновление интерфейса."""
+        if self._closing:
+            return
+        self._pending_pos_ms = pos_ms
+        if not self._pos_ui_timer.isActive():
+            self._pos_ui_timer.start()
+
     def on_player_dur_changed(self, dur_ms: int):
         """Обновление общей длительности видео при загрузке."""
-        pos_str = format_seconds_to_timecode(self.player.position() / 1000.0)
+        self._dur_ms = max(0, int(dur_ms))
+        pos_str = format_seconds_to_timecode(self._last_pos_ms / 1000.0)
         dur_str = format_seconds_to_timecode(dur_ms / 1000.0)
         self.lbl_time.setText(f"{pos_str} / {dur_str}")
         self.btn_play.setEnabled(dur_ms > 0)
@@ -888,7 +1032,9 @@ class CharacterCardsDialog(QDialog):
 
     def on_volume_changed(self, val: int):
         """Регулировка громкости звука в плеере."""
-        self.audio_output.setVolume(val / 100.0)
+        self._pending_volume = val / 100.0
+        if not self._volume_timer.isActive():
+            self._volume_timer.start()
 
     def export_characters(self):
         """Экспортирует базу персонажей для повторного использования в сериалах."""
@@ -935,11 +1081,61 @@ class CharacterCardsDialog(QDialog):
         QMessageBox.information(self, "Импорт персонажей", msg)
         self.lbl_status.setText(f"Импорт завершен: +{added} новых, {updated} обновлено.")
 
+    def _disconnect_player_signals(self):
+        """Блокирует сигналы плеера и звука, чтобы закрытие окна не вызывало обновлений интерфейса."""
+        self._closing = True
+        for timer in (
+            getattr(self, '_seek_timer', None),
+            getattr(self, '_pos_ui_timer', None),
+            getattr(self, '_transport_timer', None),
+            getattr(self, '_volume_timer', None),
+        ):
+            if not timer:
+                continue
+            try:
+                timer.stop()
+            except Exception:
+                pass
+        player = getattr(self, 'player', None)
+        if player:
+            try:
+                player.blockSignals(True)
+            except Exception:
+                pass
+        audio_output = getattr(self, 'audio_output', None)
+        if audio_output:
+            try:
+                audio_output.blockSignals(True)
+            except Exception:
+                pass
+
+    def _shutdown_player_deferred(self):
+        """Останавливает плеер после закрытия окна, уже вне обработчика закрытия."""
+        if getattr(self, '_player_shutdown_done', False):
+            return
+        self._player_shutdown_done = True
+        player = getattr(self, 'player', None)
+        if player:
+            try:
+                player.stop()
+            except Exception:
+                pass
+        audio_output = getattr(self, 'audio_output', None)
+        if audio_output:
+            try:
+                audio_output.setMuted(True)
+            except Exception:
+                pass
+
     def closeEvent(self, event):
-        """Останавливает воспроизведение при закрытии диалога."""
-        if hasattr(self, "player") and self.player:
-            self.player.stop()
-        if hasattr(self, "audio_output") and self.audio_output:
-            self.audio_output.setMuted(True)
+        """Закрывает окно сразу, а плеер останавливает после выхода из обработчика."""
+        self._disconnect_player_signals()
+        QTimer.singleShot(0, self._shutdown_player_deferred)
         super().closeEvent(event)
+
+    def done(self, result: int):
+        """Единая очистка для Esc, кнопки «Закрыть» и крестика окна."""
+        self._disconnect_player_signals()
+        QTimer.singleShot(0, self._shutdown_player_deferred)
+        super().done(result)
 

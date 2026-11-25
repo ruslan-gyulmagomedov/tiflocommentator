@@ -42,6 +42,7 @@ from ui.user_prompt_dialog import UserPromptDialog
 from ui.fragment_prompt_dialog import FragmentPromptDialog
 from ui.fragment_generation_dialog import FragmentGenerationProgressDialog
 from ui.generation_progress_dialog import GeminiGenerationProgressDialog, GeminiGenerationWorker
+from ui.chunk_selection_dialog import ChunkSelectionDialog
 from ui.tts_progress_dialog import TTSProgressDialog, TTSGenerationWorker
 from ui.video_preparation_dialog import VideoPreparationProgressDialog
 from ui.regeneration_confirm_dialog import RegenerationConfirmDialog
@@ -139,10 +140,6 @@ class MainWindow(QMainWindow):
         self.tts_service = TTSService(self.config)
         self.last_comment_list_width: int = 300
         self.last_mixer_width: int = 340
-        # Явное состояние панелей: не выводим его из ширины сплиттера,
-        # иначе скрытая панель продолжает держать клавиатурный фокус.
-        self._comment_list_open: bool = True
-        self._mixer_open: bool = True
         self._splitter_anim: Optional[QVariantAnimation] = None
         self._mixer_anim: Optional[QVariantAnimation] = None
         self._master_audio_worker: Optional[MasterAudioRenderWorker] = None
@@ -225,6 +222,12 @@ class MainWindow(QMainWindow):
         self.act_gemini.setToolTip("Запустить автоматический анализ и создание тифлокомментариев Gemini (Ctrl+G)")
         self.act_gemini.triggered.connect(self.start_gemini_generation)
 
+        # Части видео (генерация по выбранной части)
+        self.act_chunks = QAction("🧩 Части видео...", self)
+        self.act_chunks.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        self.act_chunks.setToolTip("Список всех частей видео: где уже есть тифлокомментарии, а где нет. Позволяет создать или пересоздать комментарии для любой части (Ctrl+Shift+C)")
+        self.act_chunks.triggered.connect(self.open_chunks_dialog)
+
         # SAPI5
         self.act_sapi = QAction("🗣️ SAPI5", self)
         self.act_sapi.setShortcut(QKeySequence("Ctrl+Shift+S"))
@@ -301,7 +304,7 @@ class MainWindow(QMainWindow):
             self.act_view_list, self.act_view_mixer,
             self.act_create, self.act_open, self.act_save, self.act_user_prompt,
             self.act_import_srt, self.act_export_srt, self.act_export_audio,
-            self.act_add_comm, self.act_comment_fragment, self.act_gemini,
+            self.act_add_comm, self.act_comment_fragment, self.act_gemini, self.act_chunks,
             self.act_sapi, self.act_gemini_tts,
             self.act_chars, self.act_token_usage, self.act_settings, self.act_export,
             self.act_user_guide, self.act_about
@@ -442,7 +445,7 @@ class MainWindow(QMainWindow):
         # Нижняя панель правой области: Интерактивный таймлайн
         self.timeline_widget = AccessibleTimelineWidget(self)
         self.timeline_widget.set_max_speedup(self.config.max_speedup)
-        self.timeline_widget.seek_requested.connect(self.player_widget.set_position)
+        self.timeline_widget.seek_requested.connect(self.player_widget_seek)
         self.timeline_widget.play_pause_requested.connect(self.player_widget.toggle_play)
         self.timeline_widget.commentary_timing_changed.connect(self.on_commentary_timing_changed)
         self.timeline_widget.commentary_moved.connect(self.on_commentary_moved)
@@ -654,6 +657,7 @@ class MainWindow(QMainWindow):
         # Меню Генерация
         menu_gen = menubar.addMenu("Генерация")
         menu_gen.addAction(self.act_gemini)
+        menu_gen.addAction(self.act_chunks)
         menu_gen.addAction(self.act_comment_fragment)
 
         # Меню Озвучка
@@ -685,7 +689,6 @@ class MainWindow(QMainWindow):
         right_w = sizes[2]
 
         if left_w > 30:
-            self._comment_list_open = True
             self.last_comment_list_width = left_w
             if hasattr(self, "btn_reopen_list"):
                 self.btn_reopen_list.hide()
@@ -736,54 +739,39 @@ class MainWindow(QMainWindow):
         return False
 
     def toggle_comment_list_panel(self):
-        self.set_comment_list_visible(not self._comment_list_open)
+        sizes = self.main_h_splitter.sizes()
+        is_open = bool(len(sizes) >= 1 and sizes[0] > 30) and self.comment_list_panel.isVisible()
+        self.set_comment_list_visible(not is_open)
 
     def set_comment_list_visible(self, visible: bool, animate: bool = True):
-        visible = bool(visible)
         sizes = self.main_h_splitter.sizes()
         if len(sizes) < 3:
-            sizes = [300, 560, 340]
+            sizes = [280, 560, 340]
         total_w = max(400, sum(sizes))
-        right_w = sizes[2] if self.audio_dsp_panel.isVisible() else 0
-        left_w = sizes[0] if self.comment_list_panel.isVisible() else 0
+        right_w = sizes[2]
 
         if visible:
             target_left = getattr(self, "last_comment_list_width", 280)
             if target_left < 150:
                 target_left = 280
             target_left = min(target_left, max(50, total_w - right_w - 50))
-
-            self.comment_list_panel.setVisible(True)
-            new_center = max(200, total_w - target_left - right_w)
-            self.main_h_splitter.setSizes([target_left, new_center, right_w])
-            self._comment_list_open = True
-
-            if hasattr(self, "btn_reopen_list"):
-                self.btn_reopen_list.hide()
-            if hasattr(self, "btn_reopen_mixer") and not self.btn_reopen_mixer.isVisible():
-                if hasattr(self, "top_reopen_container"):
-                    self.top_reopen_container.hide()
-            self.act_view_list.setChecked(True)
-            if hasattr(self, "status_bar"):
-                self.status_bar.showMessage("Панель комментариев развернута", 2000)
-            # Фокус — в список: сразу после Ctrl+L пользователь ожидает его там.
-            QTimer.singleShot(0, self.comment_list_panel.focus_table)
         else:
-            if left_w > 30:
-                self.last_comment_list_width = left_w
-            self._comment_list_open = False
+            if sizes[0] > 30:
+                self.last_comment_list_width = sizes[0]
+            target_left = 0
 
-            # Уводим фокус ДО скрытия, иначе он остаётся на невидимой таблице.
-            had_focus = self._panel_has_focus(self.comment_list_panel)
-            if had_focus and not self._focus_main_area():
+        self.comment_list_panel.setVisible(True)
+        # Уводим фокус ДО схлопывания панели, иначе он останется на
+        # невидимом элементе с нулевой шириной и скринридер замолчит.
+        if target_left == 0 and self._panel_has_focus(self.comment_list_panel):
+            if not self._focus_main_area():
                 if hasattr(self, "btn_reopen_list"):
                     self.btn_reopen_list.show()
                     self.btn_reopen_list.setFocus(Qt.OtherFocusReason)
+        new_center = max(200, total_w - target_left - right_w)
+        self.main_h_splitter.setSizes([target_left, new_center, right_w])
 
-            self.comment_list_panel.setVisible(False)
-            new_center = max(200, total_w - right_w)
-            self.main_h_splitter.setSizes([0, new_center, right_w])
-
+        if target_left == 0:
             if hasattr(self, "top_reopen_container"):
                 self.top_reopen_container.show()
             if hasattr(self, "btn_reopen_list"):
@@ -791,53 +779,52 @@ class MainWindow(QMainWindow):
             self.act_view_list.setChecked(False)
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage("Панель комментариев свернута", 2000)
+            return
+        if hasattr(self, "btn_reopen_list"):
+            self.btn_reopen_list.hide()
+        if hasattr(self, "btn_reopen_mixer") and not self.btn_reopen_mixer.isVisible():
+            if hasattr(self, "top_reopen_container"):
+                self.top_reopen_container.hide()
+        self.act_view_list.setChecked(True)
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage("Панель комментариев развернута", 2000)
+        # Фокус — в список: сразу после Ctrl+L пользователь ожидает его там.
+        QTimer.singleShot(0, self.comment_list_panel.focus_table)
 
     def toggle_audio_dsp_panel(self):
-        self.set_audio_dsp_panel_visible(not self._mixer_open)
+        sizes = self.main_h_splitter.sizes()
+        is_open = bool(len(sizes) >= 3 and sizes[2] > 30) and self.audio_dsp_panel.isVisible()
+        self.set_audio_dsp_panel_visible(not is_open)
 
     def set_audio_dsp_panel_visible(self, visible: bool, animate: bool = True):
-        visible = bool(visible)
         sizes = self.main_h_splitter.sizes()
         if len(sizes) < 3:
-            sizes = [300, 560, 340]
+            sizes = [280, 560, 340]
         total_w = max(400, sum(sizes))
-        left_w = sizes[0] if self.comment_list_panel.isVisible() else 0
-        right_w = sizes[2] if self.audio_dsp_panel.isVisible() else 0
+        left_w = sizes[0]
 
         if visible:
             target_right = getattr(self, "last_mixer_width", 340)
             if target_right < 180:
                 target_right = 340
             target_right = min(target_right, max(180, total_w - left_w - 200))
-
-            self.audio_dsp_panel.setVisible(True)
-            new_center = max(200, total_w - left_w - target_right)
-            self.main_h_splitter.setSizes([left_w, new_center, target_right])
-            self._mixer_open = True
-
-            if hasattr(self, "btn_reopen_mixer"):
-                self.btn_reopen_mixer.hide()
-            if hasattr(self, "btn_reopen_list") and not self.btn_reopen_list.isVisible():
-                if hasattr(self, "top_reopen_container"):
-                    self.top_reopen_container.hide()
-            self.act_view_mixer.setChecked(True)
-            if hasattr(self, "status_bar"):
-                self.status_bar.showMessage("Панель микшера развернута", 2000)
         else:
-            if right_w > 30:
-                self.last_mixer_width = right_w
-            self._mixer_open = False
+            if sizes[2] > 30:
+                self.last_mixer_width = sizes[2]
+            target_right = 0
 
-            had_focus = self._panel_has_focus(self.audio_dsp_panel)
-            if had_focus and not self._focus_main_area():
+        self.audio_dsp_panel.setVisible(True)
+        # Уводим фокус ДО схлопывания панели, иначе он останется на
+        # невидимом элементе с нулевой шириной и скринридер замолчит.
+        if target_right == 0 and self._panel_has_focus(self.audio_dsp_panel):
+            if not self._focus_main_area():
                 if hasattr(self, "btn_reopen_mixer"):
                     self.btn_reopen_mixer.show()
                     self.btn_reopen_mixer.setFocus(Qt.OtherFocusReason)
+        new_center = max(200, total_w - left_w - target_right)
+        self.main_h_splitter.setSizes([left_w, new_center, target_right])
 
-            self.audio_dsp_panel.setVisible(False)
-            new_center = max(200, total_w - left_w)
-            self.main_h_splitter.setSizes([left_w, new_center, 0])
-
+        if target_right == 0:
             if hasattr(self, "top_reopen_container"):
                 self.top_reopen_container.show()
             if hasattr(self, "btn_reopen_mixer"):
@@ -845,6 +832,15 @@ class MainWindow(QMainWindow):
             self.act_view_mixer.setChecked(False)
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage("Панель микшера свернута", 2000)
+            return
+        if hasattr(self, "btn_reopen_mixer"):
+            self.btn_reopen_mixer.hide()
+        if hasattr(self, "btn_reopen_list") and not self.btn_reopen_list.isVisible():
+            if hasattr(self, "top_reopen_container"):
+                self.top_reopen_container.hide()
+        self.act_view_mixer.setChecked(True)
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage("Панель микшера развернута", 2000)
 
     def on_dsp_panel_changed(self, dsp_dict: dict):
         """Срабатывает мгновенно при перемещении любого регулятора на панели микшера."""
@@ -873,7 +869,7 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Включен режим «Быстрое редактирование».", 3000)
 
     def player_widget_seek(self, pos_ms: int):
-        self.player_widget.set_position(pos_ms)
+        self.player_widget.set_position(pos_ms, deferred=True)
 
     def set_splitter_ratio(self, ratio: float):
         total_h = self.splitter.height()
@@ -929,6 +925,17 @@ class MainWindow(QMainWindow):
                 self.load_project(dlg.selected_project)
                 if dlg.resume_requested:
                     self.start_gemini_generation()
+                    return
+                if getattr(dlg, "start_generation_requested", False):
+                    reply = QMessageBox.question(
+                        self, "Проект создан",
+                        f"Проект «{dlg.selected_project.name}» успешно создан!\n"
+                        f"Видеофайл подготовлен и сконвертирован в эталонный формат.\n\n"
+                        f"Запустить автоматический анализ и создание тифлокомментариев с помощью Google Gemini прямо сейчас?",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        self.start_gemini_generation()
 
     def close_current_project(self):
         """Полностью выгружает текущий проект, останавливает воспроизведение и фоновые процессы."""
@@ -1077,7 +1084,16 @@ class MainWindow(QMainWindow):
         self.current_project.save()
         self.status_bar.showMessage("Проект успешно сохранен!", 4000)
 
-    def start_gemini_generation(self):
+    def start_gemini_generation(self, chunk_indices=None):
+        """
+        Запускает создание тифлокомментариев.
+        chunk_indices=None — обработать только ещё не обработанные части (продолжение).
+        chunk_indices=[...] — пересоздать только явно выбранные части.
+        """
+        # QAction triggered передаёт bool в первый аргумент — это не список частей
+        if isinstance(chunk_indices, bool):
+            chunk_indices = None
+
         if not self.current_project:
             self.open_projects_dialog()
             if not self.current_project:
@@ -1088,24 +1104,51 @@ class MainWindow(QMainWindow):
             self.open_settings()
             return
 
-        # Если в проекте уже есть сгенерированные комментарии или обработанные части видео
-        has_existing_comments = bool(self.current_project.commentaries)
-        has_processed_chunks = any(c.get("processed") for c in self.current_project.chunks)
+        chunks = self.current_project.chunks
+        unprocessed = [c for c in chunks if not c.get("processed")]
 
-        if has_existing_comments or has_processed_chunks:
-            count = len(self.current_project.commentaries)
-            confirm_dlg = RegenerationConfirmDialog(commentaries_count=count, parent=self)
-            if not confirm_dlg.exec():
-                return
+        # Подтверждение полного пересоздания — только для запуска «все необработанные»
+        if chunk_indices is None:
+            all_done = bool(chunks) and not unprocessed
+            no_chunks_but_comments = not chunks and bool(self.current_project.commentaries)
 
-            self.current_project.reset_for_full_regeneration()
-            self.player_widget.clear_master_audio()
-            self.load_project(self.current_project)
+            if all_done or no_chunks_but_comments:
+                count = len(self.current_project.commentaries)
+                confirm_dlg = RegenerationConfirmDialog(commentaries_count=count, parent=self)
+                if not confirm_dlg.exec():
+                    return
 
-        dlg = GeminiGenerationProgressDialog(self.current_project, self.config, parent=self)
+                self.current_project.reset_for_full_regeneration()
+                self.player_widget.clear_master_audio()
+                self.load_project(self.current_project)
+
+        dlg = GeminiGenerationProgressDialog(self.current_project, self.config, chunk_indices=chunk_indices, parent=self)
         dlg.exec()
 
         self.load_project(self.current_project)
+
+    def open_chunks_dialog(self):
+        """Открывает список всех частей видео с их статусом и запуском по любой части."""
+        if not self.current_project:
+            QMessageBox.information(
+                self, "Информация",
+                "Сначала откройте или создайте проект тифлокомментирования."
+            )
+            return
+
+        if not self.config.api_key:
+            QMessageBox.warning(self, "Внимание", "Пожалуйста, укажите ваш Google Gemini API-ключ в Настройках.")
+            self.open_settings()
+            return
+
+        dlg = ChunkSelectionDialog(self.current_project, parent=self)
+        if dlg.exec():
+            if dlg.generate_all_requested:
+                self.start_gemini_generation()
+                return
+            if dlg.generate_indices:
+                self.start_gemini_generation(chunk_indices=dlg.generate_indices)
+                return
 
     def add_manual_commentary(self):
         """Создает тифлокомментарий вручную на текущей позиции видео."""

@@ -139,6 +139,22 @@ def get_voice_samples_dir() -> str:
 
 
 
+def get_logs_dir() -> str:
+    """
+    Возвращает каталог журналов программы.
+    В исходниках журналы лежат в logs/ рядом с проектом.
+    В собранном EXE — в LOCALAPPDATA, чтобы рядом с программой
+    остались только Projects и Settings.ini.
+    """
+    if getattr(sys, 'frozen', False):
+        base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+        path = os.path.join(base, 'Tiflocommentator', 'logs')
+    else:
+        path = os.path.join(get_app_dir(), 'logs')
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def get_help_index_path() -> str:
     """Возвращает абсолютный путь к файлу руководства пользователя Help/index.html."""
     # 1. В бандле ресурсов PyInstaller (_MEIPASS)
